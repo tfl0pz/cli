@@ -2,12 +2,14 @@ package container
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
-	"github.com/pkg/errors"
+	"github.com/docker/cli/cli/command/completion"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -15,8 +17,8 @@ type pauseOptions struct {
 	containers []string
 }
 
-// NewPauseCommand creates a new cobra.Command for `docker pause`
-func NewPauseCommand(dockerCli command.Cli) *cobra.Command {
+// newPauseCommand creates a new cobra.Command for "docker container pause"
+func newPauseCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts pauseOptions
 
 	return &cobra.Command{
@@ -25,25 +27,32 @@ func NewPauseCommand(dockerCli command.Cli) *cobra.Command {
 		Args:  cli.RequiresMinArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.containers = args
-			return runPause(dockerCli, &opts)
+			return runPause(cmd.Context(), dockerCLI, &opts)
 		},
+		Annotations: map[string]string{
+			"aliases": "docker container pause, docker pause",
+		},
+		ValidArgsFunction: completion.ContainerNames(dockerCLI, false, func(ctr container.Summary) bool {
+			return ctr.State != container.StatePaused
+		}),
+		DisableFlagsInUseLine: true,
 	}
 }
 
-func runPause(dockerCli command.Cli, opts *pauseOptions) error {
-	ctx := context.Background()
+func runPause(ctx context.Context, dockerCLI command.Cli, opts *pauseOptions) error {
+	apiClient := dockerCLI.Client()
+	errChan := parallelOperation(ctx, opts.containers, func(ctx context.Context, container string) error {
+		_, err := apiClient.ContainerPause(ctx, container, client.ContainerPauseOptions{})
+		return err
+	})
 
-	var errs []string
-	errChan := parallelOperation(ctx, opts.containers, dockerCli.Client().ContainerPause)
-	for _, container := range opts.containers {
+	var errs []error
+	for _, ctr := range opts.containers {
 		if err := <-errChan; err != nil {
-			errs = append(errs, err.Error())
+			errs = append(errs, err)
 			continue
 		}
-		fmt.Fprintln(dockerCli.Out(), container)
+		_, _ = fmt.Fprintln(dockerCLI.Out(), ctr)
 	}
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, "\n"))
-	}
-	return nil
+	return errors.Join(errs...)
 }

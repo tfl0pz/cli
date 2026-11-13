@@ -1,16 +1,26 @@
-# syntax=docker/dockerfile:1.3
+# syntax=docker/dockerfile:1
 
-ARG GO_VERSION=1.16.8
-ARG GOLANGCI_LINT_VERSION=v1.23.8
+ARG GO_VERSION=1.27.4
+
+# ALPINE_VERSION sets the version of the alpine base image to use, including for the golang image.
+# It must be a supported tag in the docker.io/library/alpine image repository
+# that's also available as alpine image variant for the Golang version used.
+ARG ALPINE_VERSION=3.24
+# GOLANGCI_LINT_VERSION sets the version of the golangci/golangci-lint image to use.
+ARG GOLANGCI_LINT_VERSION=v2.14.0
 
 FROM golangci/golangci-lint:${GOLANGCI_LINT_VERSION}-alpine AS golangci-lint
 
-FROM golang:${GO_VERSION}-alpine AS lint
-ENV GO111MODULE=off
+FROM golang:${GO_VERSION}-alpine${ALPINE_VERSION} AS lint
+ENV GOTOOLCHAIN=local
+ENV GO111MODULE=auto
 ENV CGO_ENABLED=0
 ENV GOGC=75
 WORKDIR /go/src/github.com/docker/cli
-COPY --from=golangci-lint /usr/bin/golangci-lint /usr/bin/golangci-lint
-RUN --mount=type=bind,target=. \
+COPY --link --from=golangci-lint /usr/bin/golangci-lint /usr/bin/golangci-lint
+RUN --mount=type=bind,target=.,rw \
     --mount=type=cache,target=/root/.cache \
+        rm -f go.mod go.sum && \
+        ln -s vendor.mod go.mod && \
+        ln -s vendor.sum go.sum && \
         golangci-lint run

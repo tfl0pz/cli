@@ -1,16 +1,16 @@
 package stack
 
 import (
-	"io/ioutil"
+	"errors"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/docker/cli/cli/config/configfile"
 	"github.com/docker/cli/internal/test"
-	. "github.com/docker/cli/internal/test/builders" // Import builders to get the builder function as package function
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/pkg/errors"
+	"github.com/docker/cli/internal/test/builders"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/golden"
@@ -19,47 +19,49 @@ import (
 func TestStackPsErrors(t *testing.T) {
 	testCases := []struct {
 		args          []string
-		taskListFunc  func(options types.TaskListOptions) ([]swarm.Task, error)
+		taskListFunc  func(options client.TaskListOptions) (client.TaskListResult, error)
 		expectedError string
 	}{
-
 		{
 			args:          []string{},
-			expectedError: "requires exactly 1 argument",
+			expectedError: "requires 1 argument",
 		},
 		{
 			args:          []string{"foo", "bar"},
-			expectedError: "requires exactly 1 argument",
+			expectedError: "requires 1 argument",
 		},
 		{
 			args: []string{"foo"},
-			taskListFunc: func(options types.TaskListOptions) ([]swarm.Task, error) {
-				return nil, errors.Errorf("error getting tasks")
+			taskListFunc: func(options client.TaskListOptions) (client.TaskListResult, error) {
+				return client.TaskListResult{}, errors.New("error getting tasks")
 			},
 			expectedError: "error getting tasks",
 		},
 	}
 
 	for _, tc := range testCases {
-		cmd := newPsCommand(test.NewFakeCli(&fakeClient{
-			taskListFunc: tc.taskListFunc,
-		}), &orchestrator)
-		cmd.SetArgs(tc.args)
-		cmd.SetOut(ioutil.Discard)
-		assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
+		t.Run(tc.expectedError, func(t *testing.T) {
+			cmd := newPsCommand(test.NewFakeCli(&fakeClient{
+				taskListFunc: tc.taskListFunc,
+			}))
+			cmd.SetArgs(tc.args)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
+		})
 	}
 }
 
 func TestStackPs(t *testing.T) {
 	testCases := []struct {
-		doc                string
-		taskListFunc       func(types.TaskListOptions) ([]swarm.Task, error)
-		nodeInspectWithRaw func(string) (swarm.Node, []byte, error)
-		config             configfile.ConfigFile
-		args               []string
-		flags              map[string]string
-		expectedErr        string
-		golden             string
+		doc             string
+		taskListFunc    func(client.TaskListOptions) (client.TaskListResult, error)
+		nodeInspectFunc func(ref string) (client.NodeInspectResult, error)
+		config          configfile.ConfigFile
+		args            []string
+		flags           map[string]string
+		expectedErr     string
+		golden          string
 	}{
 		{
 			doc:         "WithEmptyName",
@@ -68,16 +70,20 @@ func TestStackPs(t *testing.T) {
 		},
 		{
 			doc: "WithEmptyStack",
-			taskListFunc: func(options types.TaskListOptions) ([]swarm.Task, error) {
-				return []swarm.Task{}, nil
+			taskListFunc: func(options client.TaskListOptions) (client.TaskListResult, error) {
+				return client.TaskListResult{}, nil
 			},
 			args:        []string{"foo"},
 			expectedErr: "nothing found in stack: foo",
 		},
 		{
 			doc: "WithQuietOption",
-			taskListFunc: func(options types.TaskListOptions) ([]swarm.Task, error) {
-				return []swarm.Task{*Task(TaskID("id-foo"))}, nil
+			taskListFunc: func(options client.TaskListOptions) (client.TaskListResult, error) {
+				return client.TaskListResult{
+					Items: []swarm.Task{
+						*builders.Task(builders.TaskID("id-foo")),
+					},
+				}, nil
 			},
 			args: []string{"foo"},
 			flags: map[string]string{
@@ -87,8 +93,12 @@ func TestStackPs(t *testing.T) {
 		},
 		{
 			doc: "WithNoTruncOption",
-			taskListFunc: func(options types.TaskListOptions) ([]swarm.Task, error) {
-				return []swarm.Task{*Task(TaskID("xn4cypcov06f2w8gsbaf2lst3"))}, nil
+			taskListFunc: func(options client.TaskListOptions) (client.TaskListResult, error) {
+				return client.TaskListResult{
+					Items: []swarm.Task{
+						*builders.Task(builders.TaskID("xn4cypcov06f2w8gsbaf2lst3")),
+					},
+				}, nil
 			},
 			args: []string{"foo"},
 			flags: map[string]string{
@@ -99,13 +109,17 @@ func TestStackPs(t *testing.T) {
 		},
 		{
 			doc: "WithNoResolveOption",
-			taskListFunc: func(options types.TaskListOptions) ([]swarm.Task, error) {
-				return []swarm.Task{*Task(
-					TaskNodeID("id-node-foo"),
-				)}, nil
+			taskListFunc: func(options client.TaskListOptions) (client.TaskListResult, error) {
+				return client.TaskListResult{
+					Items: []swarm.Task{*builders.Task(
+						builders.TaskNodeID("id-node-foo"),
+					)},
+				}, nil
 			},
-			nodeInspectWithRaw: func(ref string) (swarm.Node, []byte, error) {
-				return *Node(NodeName("node-name-bar")), nil, nil
+			nodeInspectFunc: func(ref string) (client.NodeInspectResult, error) {
+				return client.NodeInspectResult{
+					Node: *builders.Node(builders.NodeName("node-name-bar")),
+				}, nil
 			},
 			args: []string{"foo"},
 			flags: map[string]string{
@@ -116,8 +130,10 @@ func TestStackPs(t *testing.T) {
 		},
 		{
 			doc: "WithFormat",
-			taskListFunc: func(options types.TaskListOptions) ([]swarm.Task, error) {
-				return []swarm.Task{*Task(TaskServiceID("service-id-foo"))}, nil
+			taskListFunc: func(options client.TaskListOptions) (client.TaskListResult, error) {
+				return client.TaskListResult{
+					Items: []swarm.Task{*builders.Task(builders.TaskServiceID("service-id-foo"))},
+				}, nil
 			},
 			args: []string{"foo"},
 			flags: map[string]string{
@@ -127,8 +143,10 @@ func TestStackPs(t *testing.T) {
 		},
 		{
 			doc: "WithConfigFormat",
-			taskListFunc: func(options types.TaskListOptions) ([]swarm.Task, error) {
-				return []swarm.Task{*Task(TaskServiceID("service-id-foo"))}, nil
+			taskListFunc: func(options client.TaskListOptions) (client.TaskListResult, error) {
+				return client.TaskListResult{
+					Items: []swarm.Task{*builders.Task(builders.TaskServiceID("service-id-foo"))},
+				}, nil
 			},
 			config: configfile.ConfigFile{
 				TasksFormat: "{{ .Name }}",
@@ -138,18 +156,22 @@ func TestStackPs(t *testing.T) {
 		},
 		{
 			doc: "WithoutFormat",
-			taskListFunc: func(options types.TaskListOptions) ([]swarm.Task, error) {
-				return []swarm.Task{*Task(
-					TaskID("id-foo"),
-					TaskServiceID("service-id-foo"),
-					TaskNodeID("id-node"),
-					WithTaskSpec(TaskImage("myimage:mytag")),
-					TaskDesiredState(swarm.TaskStateReady),
-					WithStatus(TaskState(swarm.TaskStateFailed), Timestamp(time.Now().Add(-2*time.Hour))),
-				)}, nil
+			taskListFunc: func(options client.TaskListOptions) (client.TaskListResult, error) {
+				return client.TaskListResult{
+					Items: []swarm.Task{*builders.Task(
+						builders.TaskID("id-foo"),
+						builders.TaskServiceID("service-id-foo"),
+						builders.TaskNodeID("id-node"),
+						builders.WithTaskSpec(builders.TaskImage("myimage:mytag")),
+						builders.TaskDesiredState(swarm.TaskStateReady),
+						builders.WithStatus(builders.TaskState(swarm.TaskStateFailed), builders.Timestamp(time.Now().Add(-2*time.Hour))),
+					)},
+				}, nil
 			},
-			nodeInspectWithRaw: func(ref string) (swarm.Node, []byte, error) {
-				return *Node(NodeName("node-name-bar")), nil, nil
+			nodeInspectFunc: func(ref string) (client.NodeInspectResult, error) {
+				return client.NodeInspectResult{
+					Node: *builders.Node(builders.NodeName("node-name-bar")),
+				}, nil
 			},
 			args:   []string{"foo"},
 			golden: "stack-ps-without-format.golden",
@@ -159,17 +181,18 @@ func TestStackPs(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.doc, func(t *testing.T) {
 			cli := test.NewFakeCli(&fakeClient{
-				taskListFunc:       tc.taskListFunc,
-				nodeInspectWithRaw: tc.nodeInspectWithRaw,
+				taskListFunc:    tc.taskListFunc,
+				nodeInspectFunc: tc.nodeInspectFunc,
 			})
 			cli.SetConfigFile(&tc.config)
 
-			cmd := newPsCommand(cli, &orchestrator)
+			cmd := newPsCommand(cli)
 			cmd.SetArgs(tc.args)
 			for key, value := range tc.flags {
-				cmd.Flags().Set(key, value)
+				assert.Check(t, cmd.Flags().Set(key, value))
 			}
-			cmd.SetOut(ioutil.Discard)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
 
 			if tc.expectedErr != "" {
 				assert.Error(t, cmd.Execute(), tc.expectedErr)

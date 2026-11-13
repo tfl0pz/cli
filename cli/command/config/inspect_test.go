@@ -1,15 +1,16 @@
 package config
 
 import (
+	"context"
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"testing"
 	"time"
 
 	"github.com/docker/cli/internal/test"
-	. "github.com/docker/cli/internal/test/builders" // Import builders to get the builder function as package function
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/pkg/errors"
+	"github.com/docker/cli/internal/test/builders"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/golden"
 )
@@ -18,7 +19,7 @@ func TestConfigInspectErrors(t *testing.T) {
 	testCases := []struct {
 		args              []string
 		flags             map[string]string
-		configInspectFunc func(configID string) (swarm.Config, []byte, error)
+		configInspectFunc func(_ context.Context, configID string, _ client.ConfigInspectOptions) (client.ConfigInspectResult, error)
 		expectedError     string
 	}{
 		{
@@ -26,8 +27,8 @@ func TestConfigInspectErrors(t *testing.T) {
 		},
 		{
 			args: []string{"foo"},
-			configInspectFunc: func(configID string) (swarm.Config, []byte, error) {
-				return swarm.Config{}, nil, errors.Errorf("error while inspecting the config")
+			configInspectFunc: func(context.Context, string, client.ConfigInspectOptions) (client.ConfigInspectResult, error) {
+				return client.ConfigInspectResult{}, errors.New("error while inspecting the config")
 			},
 			expectedError: "error while inspecting the config",
 		},
@@ -36,15 +37,17 @@ func TestConfigInspectErrors(t *testing.T) {
 			flags: map[string]string{
 				"format": "{{invalid format}}",
 			},
-			expectedError: "Template parsing error",
+			expectedError: "template parsing error",
 		},
 		{
 			args: []string{"foo", "bar"},
-			configInspectFunc: func(configID string) (swarm.Config, []byte, error) {
+			configInspectFunc: func(_ context.Context, configID string, _ client.ConfigInspectOptions) (client.ConfigInspectResult, error) {
 				if configID == "foo" {
-					return *Config(ConfigName("foo")), nil, nil
+					return client.ConfigInspectResult{
+						Config: *builders.Config(builders.ConfigName("foo")),
+					}, nil
 				}
-				return swarm.Config{}, nil, errors.Errorf("error while inspecting the config")
+				return client.ConfigInspectResult{}, errors.New("error while inspecting the config")
 			},
 			expectedError: "error while inspecting the config",
 		},
@@ -57,9 +60,10 @@ func TestConfigInspectErrors(t *testing.T) {
 		)
 		cmd.SetArgs(tc.args)
 		for key, value := range tc.flags {
-			cmd.Flags().Set(key, value)
+			assert.Check(t, cmd.Flags().Set(key, value))
 		}
-		cmd.SetOut(ioutil.Discard)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
 		assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
 	}
 }
@@ -68,25 +72,34 @@ func TestConfigInspectWithoutFormat(t *testing.T) {
 	testCases := []struct {
 		name              string
 		args              []string
-		configInspectFunc func(configID string) (swarm.Config, []byte, error)
+		configInspectFunc func(_ context.Context, configID string, _ client.ConfigInspectOptions) (client.ConfigInspectResult, error)
 	}{
 		{
 			name: "single-config",
 			args: []string{"foo"},
-			configInspectFunc: func(name string) (swarm.Config, []byte, error) {
+			configInspectFunc: func(_ context.Context, name string, _ client.ConfigInspectOptions) (client.ConfigInspectResult, error) {
 				if name != "foo" {
-					return swarm.Config{}, nil, errors.Errorf("Invalid name, expected %s, got %s", "foo", name)
+					return client.ConfigInspectResult{}, fmt.Errorf("invalid name, expected %s, got %s", "foo", name)
 				}
-				return *Config(ConfigID("ID-foo"), ConfigName("foo")), nil, nil
+				return client.ConfigInspectResult{
+					Config: *builders.Config(
+						builders.ConfigID("ID-foo"),
+						builders.ConfigName("foo"),
+					),
+				}, nil
 			},
 		},
 		{
 			name: "multiple-configs-with-labels",
 			args: []string{"foo", "bar"},
-			configInspectFunc: func(name string) (swarm.Config, []byte, error) {
-				return *Config(ConfigID("ID-"+name), ConfigName(name), ConfigLabels(map[string]string{
-					"label1": "label-foo",
-				})), nil, nil
+			configInspectFunc: func(_ context.Context, name string, _ client.ConfigInspectOptions) (client.ConfigInspectResult, error) {
+				return client.ConfigInspectResult{
+					Config: *builders.Config(
+						builders.ConfigID("ID-"+name),
+						builders.ConfigName(name),
+						builders.ConfigLabels(map[string]string{"label1": "label-foo"}),
+					),
+				}, nil
 			},
 		},
 	}
@@ -100,16 +113,19 @@ func TestConfigInspectWithoutFormat(t *testing.T) {
 }
 
 func TestConfigInspectWithFormat(t *testing.T) {
-	configInspectFunc := func(name string) (swarm.Config, []byte, error) {
-		return *Config(ConfigName("foo"), ConfigLabels(map[string]string{
-			"label1": "label-foo",
-		})), nil, nil
+	configInspectFunc := func(_ context.Context, name string, _ client.ConfigInspectOptions) (client.ConfigInspectResult, error) {
+		return client.ConfigInspectResult{
+			Config: *builders.Config(
+				builders.ConfigName("foo"),
+				builders.ConfigLabels(map[string]string{"label1": "label-foo"}),
+			),
+		}, nil
 	}
 	testCases := []struct {
 		name              string
 		format            string
 		args              []string
-		configInspectFunc func(name string) (swarm.Config, []byte, error)
+		configInspectFunc func(_ context.Context, name string, _ client.ConfigInspectOptions) (client.ConfigInspectResult, error)
 	}{
 		{
 			name:              "simple-template",
@@ -130,7 +146,7 @@ func TestConfigInspectWithFormat(t *testing.T) {
 		})
 		cmd := newConfigInspectCommand(cli)
 		cmd.SetArgs(tc.args)
-		cmd.Flags().Set("format", tc.format)
+		assert.Check(t, cmd.Flags().Set("format", tc.format))
 		assert.NilError(t, cmd.Execute())
 		golden.Assert(t, cli.OutBuffer().String(), fmt.Sprintf("config-inspect-with-format.%s.golden", tc.name))
 	}
@@ -139,21 +155,23 @@ func TestConfigInspectWithFormat(t *testing.T) {
 func TestConfigInspectPretty(t *testing.T) {
 	testCases := []struct {
 		name              string
-		configInspectFunc func(string) (swarm.Config, []byte, error)
+		configInspectFunc func(context.Context, string, client.ConfigInspectOptions) (client.ConfigInspectResult, error)
 	}{
 		{
 			name: "simple",
-			configInspectFunc: func(id string) (swarm.Config, []byte, error) {
-				return *Config(
-					ConfigLabels(map[string]string{
-						"lbl1": "value1",
-					}),
-					ConfigID("configID"),
-					ConfigName("configName"),
-					ConfigCreatedAt(time.Time{}),
-					ConfigUpdatedAt(time.Time{}),
-					ConfigData([]byte("payload here")),
-				), []byte{}, nil
+			configInspectFunc: func(_ context.Context, id string, _ client.ConfigInspectOptions) (client.ConfigInspectResult, error) {
+				return client.ConfigInspectResult{
+					Config: *builders.Config(
+						builders.ConfigLabels(map[string]string{
+							"lbl1": "value1",
+						}),
+						builders.ConfigID("configID"),
+						builders.ConfigName("configName"),
+						builders.ConfigCreatedAt(time.Time{}),
+						builders.ConfigUpdatedAt(time.Time{}),
+						builders.ConfigData([]byte("payload here")),
+					),
+				}, nil
 			},
 		},
 	}
@@ -164,7 +182,7 @@ func TestConfigInspectPretty(t *testing.T) {
 		cmd := newConfigInspectCommand(cli)
 
 		cmd.SetArgs([]string{"configID"})
-		cmd.Flags().Set("pretty", "true")
+		assert.Check(t, cmd.Flags().Set("pretty", "true"))
 		assert.NilError(t, cmd.Execute())
 		golden.Assert(t, cli.OutBuffer().String(), fmt.Sprintf("config-inspect-pretty.%s.golden", tc.name))
 	}

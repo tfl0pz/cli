@@ -5,17 +5,13 @@ import (
 	"strings"
 
 	"github.com/docker/cli/cli/compose/convert"
-	"github.com/docker/docker/api"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 )
 
 type fakeClient struct {
 	client.Client
-
-	version string
 
 	services []string
 	networks []string
@@ -27,167 +23,166 @@ type fakeClient struct {
 	removedSecrets  []string
 	removedConfigs  []string
 
-	serviceListFunc    func(options types.ServiceListOptions) ([]swarm.Service, error)
-	networkListFunc    func(options types.NetworkListOptions) ([]types.NetworkResource, error)
-	secretListFunc     func(options types.SecretListOptions) ([]swarm.Secret, error)
-	configListFunc     func(options types.ConfigListOptions) ([]swarm.Config, error)
-	nodeListFunc       func(options types.NodeListOptions) ([]swarm.Node, error)
-	taskListFunc       func(options types.TaskListOptions) ([]swarm.Task, error)
-	nodeInspectWithRaw func(ref string) (swarm.Node, []byte, error)
-
-	serviceUpdateFunc func(serviceID string, version swarm.Version, service swarm.ServiceSpec, options types.ServiceUpdateOptions) (types.ServiceUpdateResponse, error)
-
-	serviceRemoveFunc func(serviceID string) error
+	serviceListFunc   func(options client.ServiceListOptions) (client.ServiceListResult, error)
+	networkListFunc   func(options client.NetworkListOptions) (client.NetworkListResult, error)
+	secretListFunc    func(options client.SecretListOptions) (client.SecretListResult, error)
+	configListFunc    func(options client.ConfigListOptions) (client.ConfigListResult, error)
+	nodeListFunc      func(options client.NodeListOptions) (client.NodeListResult, error)
+	taskListFunc      func(options client.TaskListOptions) (client.TaskListResult, error)
+	nodeInspectFunc   func(ref string) (client.NodeInspectResult, error)
+	serviceUpdateFunc func(serviceID string, options client.ServiceUpdateOptions) (client.ServiceUpdateResult, error)
+	serviceRemoveFunc func(serviceID string) (client.ServiceRemoveResult, error)
 	networkRemoveFunc func(networkID string) error
-	secretRemoveFunc  func(secretID string) error
-	configRemoveFunc  func(configID string) error
+	secretRemoveFunc  func(secretID string) (client.SecretRemoveResult, error)
+	configRemoveFunc  func(configID string) (client.ConfigRemoveResult, error)
 }
 
-func (cli *fakeClient) ServerVersion(ctx context.Context) (types.Version, error) {
-	return types.Version{
-		Version:    "docker-dev",
-		APIVersion: api.DefaultVersion,
+func (*fakeClient) ServerVersion(context.Context, client.ServerVersionOptions) (client.ServerVersionResult, error) {
+	return client.ServerVersionResult{
+		APIVersion: client.MaxAPIVersion,
 	}, nil
 }
 
-func (cli *fakeClient) ClientVersion() string {
-	return cli.version
+func (*fakeClient) ClientVersion() string {
+	return client.MaxAPIVersion
 }
 
-func (cli *fakeClient) ServiceList(ctx context.Context, options types.ServiceListOptions) ([]swarm.Service, error) {
+func (cli *fakeClient) ServiceList(_ context.Context, options client.ServiceListOptions) (client.ServiceListResult, error) {
 	if cli.serviceListFunc != nil {
 		return cli.serviceListFunc(options)
 	}
 
 	namespace := namespaceFromFilters(options.Filters)
-	servicesList := []swarm.Service{}
+	servicesList := client.ServiceListResult{}
 	for _, name := range cli.services {
 		if belongToNamespace(name, namespace) {
-			servicesList = append(servicesList, serviceFromName(name))
+			servicesList.Items = append(servicesList.Items, serviceFromName(name))
 		}
 	}
 	return servicesList, nil
 }
 
-func (cli *fakeClient) NetworkList(ctx context.Context, options types.NetworkListOptions) ([]types.NetworkResource, error) {
+func (cli *fakeClient) NetworkList(_ context.Context, options client.NetworkListOptions) (client.NetworkListResult, error) {
 	if cli.networkListFunc != nil {
 		return cli.networkListFunc(options)
 	}
 
 	namespace := namespaceFromFilters(options.Filters)
-	networksList := []types.NetworkResource{}
+	networksList := client.NetworkListResult{}
 	for _, name := range cli.networks {
 		if belongToNamespace(name, namespace) {
-			networksList = append(networksList, networkFromName(name))
+			networksList.Items = append(networksList.Items, networkFromName(name))
 		}
 	}
 	return networksList, nil
 }
 
-func (cli *fakeClient) SecretList(ctx context.Context, options types.SecretListOptions) ([]swarm.Secret, error) {
+func (cli *fakeClient) SecretList(_ context.Context, options client.SecretListOptions) (client.SecretListResult, error) {
 	if cli.secretListFunc != nil {
 		return cli.secretListFunc(options)
 	}
 
 	namespace := namespaceFromFilters(options.Filters)
-	secretsList := []swarm.Secret{}
+	secretsList := client.SecretListResult{}
 	for _, name := range cli.secrets {
 		if belongToNamespace(name, namespace) {
-			secretsList = append(secretsList, secretFromName(name))
+			secretsList.Items = append(secretsList.Items, secretFromName(name))
 		}
 	}
 	return secretsList, nil
 }
 
-func (cli *fakeClient) ConfigList(ctx context.Context, options types.ConfigListOptions) ([]swarm.Config, error) {
+func (cli *fakeClient) ConfigList(_ context.Context, options client.ConfigListOptions) (client.ConfigListResult, error) {
 	if cli.configListFunc != nil {
 		return cli.configListFunc(options)
 	}
 
 	namespace := namespaceFromFilters(options.Filters)
-	configsList := []swarm.Config{}
+	configsList := client.ConfigListResult{}
 	for _, name := range cli.configs {
 		if belongToNamespace(name, namespace) {
-			configsList = append(configsList, configFromName(name))
+			configsList.Items = append(configsList.Items, configFromName(name))
 		}
 	}
 	return configsList, nil
 }
 
-func (cli *fakeClient) TaskList(ctx context.Context, options types.TaskListOptions) ([]swarm.Task, error) {
+func (cli *fakeClient) TaskList(_ context.Context, options client.TaskListOptions) (client.TaskListResult, error) {
 	if cli.taskListFunc != nil {
 		return cli.taskListFunc(options)
 	}
-	return []swarm.Task{}, nil
+	return client.TaskListResult{}, nil
 }
 
-func (cli *fakeClient) NodeList(ctx context.Context, options types.NodeListOptions) ([]swarm.Node, error) {
+func (cli *fakeClient) NodeList(_ context.Context, options client.NodeListOptions) (client.NodeListResult, error) {
 	if cli.nodeListFunc != nil {
 		return cli.nodeListFunc(options)
 	}
-	return []swarm.Node{}, nil
+	return client.NodeListResult{}, nil
 }
 
-func (cli *fakeClient) NodeInspectWithRaw(ctx context.Context, ref string) (swarm.Node, []byte, error) {
-	if cli.nodeInspectWithRaw != nil {
-		return cli.nodeInspectWithRaw(ref)
+func (cli *fakeClient) NodeInspect(_ context.Context, ref string, _ client.NodeInspectOptions) (client.NodeInspectResult, error) {
+	if cli.nodeInspectFunc != nil {
+		return cli.nodeInspectFunc(ref)
 	}
-	return swarm.Node{}, nil, nil
+	return client.NodeInspectResult{}, nil
 }
 
-func (cli *fakeClient) ServiceUpdate(ctx context.Context, serviceID string, version swarm.Version, service swarm.ServiceSpec, options types.ServiceUpdateOptions) (types.ServiceUpdateResponse, error) {
+func (cli *fakeClient) ServiceUpdate(_ context.Context, serviceID string, options client.ServiceUpdateOptions) (client.ServiceUpdateResult, error) {
 	if cli.serviceUpdateFunc != nil {
-		return cli.serviceUpdateFunc(serviceID, version, service, options)
+		return cli.serviceUpdateFunc(serviceID, options)
 	}
 
-	return types.ServiceUpdateResponse{}, nil
+	return client.ServiceUpdateResult{}, nil
 }
 
-func (cli *fakeClient) ServiceRemove(ctx context.Context, serviceID string) error {
+func (cli *fakeClient) ServiceRemove(_ context.Context, serviceID string, _ client.ServiceRemoveOptions) (client.ServiceRemoveResult, error) {
 	if cli.serviceRemoveFunc != nil {
 		return cli.serviceRemoveFunc(serviceID)
 	}
 
 	cli.removedServices = append(cli.removedServices, serviceID)
-	return nil
+	return client.ServiceRemoveResult{}, nil
 }
 
-func (cli *fakeClient) NetworkRemove(ctx context.Context, networkID string) error {
+func (cli *fakeClient) NetworkRemove(_ context.Context, networkID string, _ client.NetworkRemoveOptions) (client.NetworkRemoveResult, error) {
 	if cli.networkRemoveFunc != nil {
-		return cli.networkRemoveFunc(networkID)
+		return client.NetworkRemoveResult{}, cli.networkRemoveFunc(networkID)
 	}
 
 	cli.removedNetworks = append(cli.removedNetworks, networkID)
-	return nil
+	return client.NetworkRemoveResult{}, nil
 }
 
-func (cli *fakeClient) SecretRemove(ctx context.Context, secretID string) error {
+func (cli *fakeClient) SecretRemove(_ context.Context, secretID string, _ client.SecretRemoveOptions) (client.SecretRemoveResult, error) {
 	if cli.secretRemoveFunc != nil {
 		return cli.secretRemoveFunc(secretID)
 	}
 
 	cli.removedSecrets = append(cli.removedSecrets, secretID)
-	return nil
+	return client.SecretRemoveResult{}, nil
 }
 
-func (cli *fakeClient) ConfigRemove(ctx context.Context, configID string) error {
+func (cli *fakeClient) ConfigRemove(_ context.Context, configID string, _ client.ConfigRemoveOptions) (client.ConfigRemoveResult, error) {
 	if cli.configRemoveFunc != nil {
 		return cli.configRemoveFunc(configID)
 	}
 
 	cli.removedConfigs = append(cli.removedConfigs, configID)
-	return nil
+	return client.ConfigRemoveResult{}, nil
 }
 
-func (cli *fakeClient) ServiceInspectWithRaw(ctx context.Context, serviceID string, opts types.ServiceInspectOptions) (swarm.Service, []byte, error) {
-	return swarm.Service{
-		ID: serviceID,
-		Spec: swarm.ServiceSpec{
-			Annotations: swarm.Annotations{
-				Name: serviceID,
+func (*fakeClient) ServiceInspect(_ context.Context, serviceID string, _ client.ServiceInspectOptions) (client.ServiceInspectResult, error) {
+	return client.ServiceInspectResult{
+		Service: swarm.Service{
+			ID: serviceID,
+			Spec: swarm.ServiceSpec{
+				Annotations: swarm.Annotations{
+					Name: serviceID,
+				},
 			},
 		},
-	}, []byte{}, nil
+	}, nil
 }
 
 func serviceFromName(name string) swarm.Service {
@@ -199,10 +194,12 @@ func serviceFromName(name string) swarm.Service {
 	}
 }
 
-func networkFromName(name string) types.NetworkResource {
-	return types.NetworkResource{
-		ID:   "ID-" + name,
-		Name: name,
+func networkFromName(name string) network.Summary {
+	return network.Summary{
+		Network: network.Network{
+			ID:   "ID-" + name,
+			Name: name,
+		},
 	}
 }
 
@@ -224,8 +221,13 @@ func configFromName(name string) swarm.Config {
 	}
 }
 
-func namespaceFromFilters(filters filters.Args) string {
-	label := filters.Get("label")[0]
+func namespaceFromFilters(fltrs client.Filters) string {
+	// FIXME(thaJeztah): more elegant way for this? Should we have a utility for this?
+	var label string
+	for fltr := range fltrs["label"] {
+		label = fltr
+		break
+	}
 	return strings.TrimPrefix(label, convert.LabelNamespace+"=")
 }
 

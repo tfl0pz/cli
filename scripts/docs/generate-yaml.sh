@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Generate yaml for docker/cli reference docs
-set -eu -o pipefail
 
-mkdir -p docs/yaml/gen
+set -eu
 
-GO111MODULE=off go build -o build/yaml-docs-generator github.com/docker/cli/docs/yaml
-build/yaml-docs-generator --root "$(pwd)" --target "$(pwd)/docs/yaml/gen"
+mkdir -p docs/yaml
+set -x
+go run -mod=vendor -tags docsgen ./docs/generate/generate.go --formats yaml --source "./docs/reference/commandline" --target "./docs/yaml"

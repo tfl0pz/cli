@@ -1,34 +1,28 @@
----
-title: "volume ls"
-description: "The volume ls command description and usage"
-keywords: "volume, list"
----
-
 # volume ls
 
-```markdown
-Usage:  docker volume ls [OPTIONS]
-
+<!---MARKER_GEN_START-->
 List volumes
 
-Aliases:
-  ls, list
+### Aliases
 
-Options:
-  -f, --filter value   Provide filter values (e.g. 'dangling=true') (default [])
-                       - dangling=<boolean> a volume if referenced or not
-                       - driver=<string> a volume's driver name
-                       - label=<key> or label=<key>=<value>
-                       - name=<string> a volume's name
-      --format string  Pretty-print volumes using a Go template
-      --help           Print usage
-  -q, --quiet          Only display volume names
-```
+`docker volume ls`, `docker volume list`
+
+### Options
+
+| Name                                   | Type     | Default | Description                                                                                                                                                                                                                                                                                                                                                                                                                          |
+|:---------------------------------------|:---------|:--------|:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--cluster`                            | `bool`   |         | Display only cluster volumes, and use cluster volume list formatting                                                                                                                                                                                                                                                                                                                                                                 |
+| [`-f`](#filter), [`--filter`](#filter) | `filter` |         | Provide filter values (e.g. `dangling=true`)                                                                                                                                                                                                                                                                                                                                                                                         |
+| [`--format`](#format)                  | `string` |         | Format output using a custom template:<br>'table':            Print output in table format with column headers (default)<br>'table TEMPLATE':   Print output in table format using the given Go template<br>'json':             Print in JSON format<br>'TEMPLATE':         Print output using the given Go template.<br>Refer to https://docs.docker.com/go/formatting/ for more information about formatting output with templates |
+| `-q`, `--quiet`                        | `bool`   |         | Only display volume names                                                                                                                                                                                                                                                                                                                                                                                                            |
+
+
+<!---MARKER_GEN_END-->
 
 ## Description
 
 List all the volumes known to Docker. You can filter using the `-f` or
-`--filter` flag. Refer to the [filtering](#filtering) section for more
+`--filter` flag. Refer to the [filtering](#filter) section for more
 information about available filter options.
 
 ## Examples
@@ -51,14 +45,14 @@ local               rosemary
 local               tyler
 ```
 
-### Filtering
+### <a name="filter"></a> Filtering (--filter)
 
 The filtering flag (`-f` or `--filter`) format is of "key=value". If there is more
 than one filter, then pass multiple flags (e.g., `--filter "foo=bar" --filter "bif=baz"`)
 
 The currently supported filters are:
 
-- dangling (boolean - true or false, 0 or 1)
+- dangling (Boolean - true or false, 0 or 1)
 - driver (a volume driver's name)
 - label (`label=<key>` or `label=<key>=<value>`)
 - name (a volume's name)
@@ -95,7 +89,7 @@ local               tyler
 The `label` filter matches volumes based on the presence of a `label` alone or
 a `label` and a value.
 
-First, let's create some volumes to illustrate this;
+First, create some volumes to illustrate this;
 
 ```console
 $ docker volume create the-doctor --label is-timelord=yes
@@ -151,21 +145,21 @@ DRIVER              VOLUME NAME
 local               rosemary
 ```
 
-### Formatting
+### <a name="format"></a> Format the output (--format)
 
 The formatting options (`--format`) pretty-prints volumes output
 using a Go template.
 
 Valid placeholders for the Go template are listed below:
 
-Placeholder   | Description
---------------|------------------------------------------------------------------------------------------
-`.Name`       | Volume name
-`.Driver`     | Volume driver
-`.Scope`      | Volume scope (local, global)
-`.Mountpoint` | The mount point of the volume on the host
-`.Labels`     | All labels assigned to the volume
-`.Label`      | Value of a specific label for this volume. For example `{{.Label "project.version"}}`
+| Placeholder   | Description                                                                           |
+|---------------|---------------------------------------------------------------------------------------|
+| `.Name`       | Volume name                                                                           |
+| `.Driver`     | Volume driver                                                                         |
+| `.Scope`      | Volume scope (local, global)                                                          |
+| `.Mountpoint` | The mount point of the volume on the host                                             |
+| `.Labels`     | All labels assigned to the volume                                                     |
+| `.Label`      | Value of a specific label for this volume. For example `{{.Label "project.version"}}` |
 
 When using the `--format` option, the `volume ls` command will either
 output the data exactly as the template declares or, when using the
@@ -180,6 +174,13 @@ $ docker volume ls --format "{{.Name}}: {{.Driver}}"
 vol1: local
 vol2: local
 vol3: local
+```
+
+To list all volumes in JSON format, use the `json` directive:
+
+```console
+$ docker volume ls --format json
+{"Driver":"local","Labels":"","Links":"N/A","Mountpoint":"/var/lib/docker/volumes/docker-cli-dev-cache/_data","Name":"docker-cli-dev-cache","Scope":"local","Size":"N/A"}
 ```
 
 ## Related commands

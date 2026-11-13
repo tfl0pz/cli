@@ -4,12 +4,11 @@ import (
 	"testing"
 
 	"gotest.tools/v3/assert"
-	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/golden"
 	"gotest.tools/v3/icmd"
 )
 
-const shortHFlagDeprecated = "Flag shorthand -h has been deprecated, please use --help\n"
+const shortHFlagDeprecated = "Flag shorthand -h has been deprecated, use --help\n"
 
 // TestRunNonexisting ensures correct behaviour when running a nonexistent plugin.
 func TestRunNonexisting(t *testing.T) {
@@ -63,6 +62,22 @@ func TestNonexistingHelp(t *testing.T) {
 	})
 }
 
+// TestNonexistingVersion ensures correct behaviour when invoking a
+// nonexistent plugin with `--version`.
+func TestNonexistingVersion(t *testing.T) {
+	run, _, cleanup := prepare(t)
+	defer cleanup()
+
+	for _, flag := range []string{"--version", "-v"} {
+		res := icmd.RunCmd(run("nonexistent", flag))
+		res.Assert(t, icmd.Expected{
+			ExitCode: 1,
+			Out:      icmd.None,
+		})
+		golden.Assert(t, res.Stderr(), "docker-nonexistent-err.golden")
+	}
+}
+
 // TestRunBad ensures correct behaviour when running an existent but invalid plugin
 func TestRunBad(t *testing.T) {
 	run, _, cleanup := prepare(t)
@@ -105,12 +120,12 @@ func TestBadHelp(t *testing.T) {
 		Err: icmd.None,
 	})
 	// Short -h should be the same, modulo the deprecation message
-	exp := shortHFlagDeprecated + res.Stdout()
+	usage := res.Stdout()
 	res = icmd.RunCmd(run("badmeta", "-h"))
 	res.Assert(t, icmd.Expected{
 		ExitCode: 0,
 		// This should be identical to the --help case above
-		Out: exp,
+		Out: shortHFlagDeprecated + usage,
 		Err: icmd.None,
 	})
 }
@@ -123,7 +138,7 @@ func TestRunGood(t *testing.T) {
 	res := icmd.RunCmd(run("helloworld"))
 	res.Assert(t, icmd.Expected{
 		ExitCode: 0,
-		Out:      "Hello World!",
+		Out:      "Hello World",
 		Err:      icmd.None,
 	})
 }
@@ -218,18 +233,23 @@ func TestCliInitialized(t *testing.T) {
 	run, _, cleanup := prepare(t)
 	defer cleanup()
 
-	var apiversion string
+	var apiVersion string
 	t.Run("withhook", func(t *testing.T) {
 		res := icmd.RunCmd(run("helloworld", "--pre-run", "apiversion"))
-		res.Assert(t, icmd.Success)
-		assert.Assert(t, res.Stdout() != "")
-		apiversion = res.Stdout()
-		assert.Assert(t, is.Equal(res.Stderr(), "Plugin PersistentPreRunE called"))
+		res.Assert(t, icmd.Expected{
+			ExitCode: 0,
+			Err:      "Plugin PersistentPreRunE called",
+		})
+		apiVersion = res.Stdout()
+		assert.Assert(t, apiVersion != "")
 	})
 	t.Run("withouthook", func(t *testing.T) {
 		res := icmd.RunCmd(run("nopersistentprerun"))
-		res.Assert(t, icmd.Success)
-		assert.Assert(t, is.Equal(res.Stdout(), apiversion))
+		res.Assert(t, icmd.Expected{
+			ExitCode: 0,
+			Err:      icmd.None,
+			Out:      apiVersion,
+		})
 	})
 }
 

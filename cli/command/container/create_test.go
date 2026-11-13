@@ -2,23 +2,23 @@ package container
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"io"
-	"io/ioutil"
 	"os"
+	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"testing"
 
+	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/config/configfile"
 	"github.com/docker/cli/internal/test"
-	"github.com/docker/cli/internal/test/notary"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/network"
 	"github.com/google/go-cmp/cmp"
-	specs "github.com/opencontainers/image-spec/specs-go/v1"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/system"
+	"github.com/moby/moby/client"
+	"github.com/spf13/pflag"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/fs"
@@ -39,21 +39,35 @@ func TestNewCIDFileWhenFileAlreadyExists(t *testing.T) {
 	defer tempfile.Remove()
 
 	_, err := newCIDFile(tempfile.Path())
-	assert.ErrorContains(t, err, "Container ID file found")
+	assert.ErrorContains(t, err, "container ID file found")
 }
 
 func TestCIDFileCloseWithNoWrite(t *testing.T) {
-	tempdir := fs.NewDir(t, "test-cid-file")
-	defer tempdir.Remove()
+	// Closing should remove the file if it was not written to.
+	t.Run("closing should remove file", func(t *testing.T) {
+		filename := filepath.Join(t.TempDir(), "cidfile-1")
+		file, err := newCIDFile(filename)
+		assert.NilError(t, err)
+		assert.Check(t, is.Equal(file.path, filename))
 
-	path := tempdir.Join("cidfile")
-	file, err := newCIDFile(path)
-	assert.NilError(t, err)
-	assert.Check(t, is.Equal(file.path, path))
+		assert.NilError(t, file.Close())
+		_, err = os.Stat(filename)
+		assert.Check(t, os.IsNotExist(err))
+	})
 
-	assert.NilError(t, file.Close())
-	_, err = os.Stat(path)
-	assert.Check(t, os.IsNotExist(err))
+	// Closing (and removing) the file should not produce an error if the file no longer exists.
+	t.Run("close should remove file", func(t *testing.T) {
+		filename := filepath.Join(t.TempDir(), "cidfile-2")
+		file, err := newCIDFile(filename)
+		assert.NilError(t, err)
+		assert.Check(t, is.Equal(file.path, filename))
+
+		assert.NilError(t, os.Remove(filename))
+		_, err = os.Stat(filename)
+		assert.Check(t, os.IsNotExist(err))
+
+		assert.NilError(t, file.Close())
+	})
 }
 
 func TestCIDFileCloseWithWrite(t *testing.T) {
@@ -67,7 +81,7 @@ func TestCIDFileCloseWithWrite(t *testing.T) {
 	content := "id"
 	assert.NilError(t, file.Write(content))
 
-	actual, err := ioutil.ReadFile(path)
+	actual, err := os.ReadFile(path)
 	assert.NilError(t, err)
 	assert.Check(t, is.Equal(content, string(actual)))
 
@@ -77,8 +91,10 @@ func TestCIDFileCloseWithWrite(t *testing.T) {
 }
 
 func TestCreateContainerImagePullPolicy(t *testing.T) {
-	imageName := "does-not-exist-locally"
-	containerID := "abcdef"
+	const (
+		imageName   = "does-not-exist-locally"
+		containerID = "abcdef"
+	)
 	config := &containerConfig{
 		Config: &container.Config{
 			Image: imageName,
@@ -89,18 +105,18 @@ func TestCreateContainerImagePullPolicy(t *testing.T) {
 	cases := []struct {
 		PullPolicy      string
 		ExpectedPulls   int
-		ExpectedBody    container.ContainerCreateCreatedBody
+		ExpectedID      string
 		ExpectedErrMsg  string
 		ResponseCounter int
 	}{
 		{
 			PullPolicy:    PullImageMissing,
 			ExpectedPulls: 1,
-			ExpectedBody:  container.ContainerCreateCreatedBody{ID: containerID},
+			ExpectedID:    containerID,
 		}, {
 			PullPolicy:      PullImageAlways,
 			ExpectedPulls:   1,
-			ExpectedBody:    container.ContainerCreateCreatedBody{ID: containerID},
+			ExpectedID:      containerID,
 			ResponseCounter: 1, // This lets us return a container on the first pull
 		}, {
 			PullPolicy:     PullImageNever,
@@ -108,160 +124,148 @@ func TestCreateContainerImagePullPolicy(t *testing.T) {
 			ExpectedErrMsg: "error fake not found",
 		},
 	}
-	for _, c := range cases {
-		c := c
-		pullCounter := 0
+	for _, tc := range cases {
+		t.Run(tc.PullPolicy, func(t *testing.T) {
+			pullCounter := 0
 
-		client := &fakeClient{
-			createContainerFunc: func(
-				config *container.Config,
-				hostConfig *container.HostConfig,
-				networkingConfig *network.NetworkingConfig,
-				platform *specs.Platform,
-				containerName string,
-			) (container.ContainerCreateCreatedBody, error) {
-				defer func() { c.ResponseCounter++ }()
-				switch c.ResponseCounter {
-				case 0:
-					return container.ContainerCreateCreatedBody{}, fakeNotFound{}
-				default:
-					return container.ContainerCreateCreatedBody{ID: containerID}, nil
-				}
-			},
-			imageCreateFunc: func(parentReference string, options types.ImageCreateOptions) (io.ReadCloser, error) {
-				defer func() { pullCounter++ }()
-				return ioutil.NopCloser(strings.NewReader("")), nil
-			},
-			infoFunc: func() (types.Info, error) {
-				return types.Info{IndexServerAddress: "https://indexserver.example.com"}, nil
-			},
-		}
-		cli := test.NewFakeCli(client)
-		body, err := createContainer(context.Background(), cli, config, &createOptions{
-			name:      "name",
-			platform:  runtime.GOOS,
-			untrusted: true,
-			pull:      c.PullPolicy,
+			apiClient := &fakeClient{
+				createContainerFunc: func(options client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+					defer func() { tc.ResponseCounter++ }()
+					switch tc.ResponseCounter {
+					case 0:
+						return client.ContainerCreateResult{}, fakeNotFound{}
+					default:
+						return client.ContainerCreateResult{ID: containerID}, nil
+					}
+				},
+				imagePullFunc: func(ctx context.Context, parentReference string, options client.ImagePullOptions) (client.ImagePullResponse, error) {
+					defer func() { pullCounter++ }()
+					return fakeStreamResult{ReadCloser: io.NopCloser(strings.NewReader(""))}, nil
+				},
+				infoFunc: func() (client.SystemInfoResult, error) {
+					return client.SystemInfoResult{
+						Info: system.Info{IndexServerAddress: "https://indexserver.example.com"},
+					}, nil
+				},
+			}
+			fakeCLI := test.NewFakeCli(apiClient)
+			id, err := createContainer(context.Background(), fakeCLI, config, &createOptions{
+				name:     "name",
+				platform: runtime.GOOS,
+				pull:     tc.PullPolicy,
+			})
+
+			if tc.ExpectedErrMsg != "" {
+				assert.Check(t, is.ErrorContains(err, tc.ExpectedErrMsg))
+			} else {
+				assert.Check(t, err)
+				assert.Check(t, is.Equal(tc.ExpectedID, id))
+			}
+
+			assert.Check(t, is.Equal(tc.ExpectedPulls, pullCounter))
 		})
-
-		if c.ExpectedErrMsg != "" {
-			assert.ErrorContains(t, err, c.ExpectedErrMsg)
-		} else {
-			assert.NilError(t, err)
-			assert.Check(t, is.DeepEqual(c.ExpectedBody, *body))
-		}
-
-		assert.Check(t, is.Equal(c.ExpectedPulls, pullCounter))
 	}
 }
-func TestNewCreateCommandWithContentTrustErrors(t *testing.T) {
-	testCases := []struct {
-		name          string
-		args          []string
-		expectedError string
-		notaryFunc    test.NotaryClientFuncType
+
+func TestCreateContainerImagePullPolicyInvalid(t *testing.T) {
+	cases := []struct {
+		PullPolicy     string
+		ExpectedErrMsg string
 	}{
 		{
-			name:          "offline-notary-server",
-			notaryFunc:    notary.GetOfflineNotaryRepository,
-			expectedError: "client is offline",
-			args:          []string{"image:tag"},
+			PullPolicy:     "busybox:latest",
+			ExpectedErrMsg: `invalid pull option: 'busybox:latest': must be one of "always", "missing" or "never"`,
 		},
 		{
-			name:          "uninitialized-notary-server",
-			notaryFunc:    notary.GetUninitializedNotaryRepository,
-			expectedError: "remote trust data does not exist",
-			args:          []string{"image:tag"},
-		},
-		{
-			name:          "empty-notary-server",
-			notaryFunc:    notary.GetEmptyTargetsNotaryRepository,
-			expectedError: "No valid trust data for tag",
-			args:          []string{"image:tag"},
+			PullPolicy:     "--network=foo",
+			ExpectedErrMsg: `invalid pull option: '--network=foo': must be one of "always", "missing" or "never"`,
 		},
 	}
-	for _, tc := range testCases {
-		tc := tc
-		cli := test.NewFakeCli(&fakeClient{
-			createContainerFunc: func(config *container.Config,
-				hostConfig *container.HostConfig,
-				networkingConfig *network.NetworkingConfig,
-				platform *specs.Platform,
-				containerName string,
-			) (container.ContainerCreateCreatedBody, error) {
-				return container.ContainerCreateCreatedBody{}, fmt.Errorf("shouldn't try to pull image")
-			},
-		}, test.EnableContentTrust)
-		cli.SetNotaryClient(tc.notaryFunc)
-		cmd := NewCreateCommand(cli)
-		cmd.SetOut(ioutil.Discard)
-		cmd.SetArgs(tc.args)
-		err := cmd.Execute()
-		assert.ErrorContains(t, err, tc.expectedError)
+	for _, tc := range cases {
+		t.Run(tc.PullPolicy, func(t *testing.T) {
+			dockerCli := test.NewFakeCli(&fakeClient{})
+			err := runCreate(
+				context.TODO(),
+				dockerCli,
+				&pflag.FlagSet{},
+				&createOptions{pull: tc.PullPolicy},
+				&containerOptions{},
+			)
+
+			statusErr := cli.StatusError{}
+			assert.Check(t, errors.As(err, &statusErr))
+			assert.Check(t, is.Equal(statusErr.StatusCode, 125))
+			assert.Check(t, is.ErrorContains(err, tc.ExpectedErrMsg))
+		})
+	}
+}
+
+func TestCreateContainerValidateFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		expectedErr string
+	}{
+		{
+			name:        "with invalid --attach value",
+			args:        []string{"--attach", "STDINFO", "myimage"},
+			expectedErr: `invalid argument "STDINFO" for "-a, --attach" flag: valid streams are STDIN, STDOUT and STDERR`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newCreateCommand(test.NewFakeCli(&fakeClient{}))
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs(tc.args)
+
+			err := cmd.Execute()
+			if tc.expectedErr != "" {
+				assert.Check(t, is.ErrorContains(err, tc.expectedErr))
+			} else {
+				assert.Check(t, is.Nil(err))
+			}
+		})
 	}
 }
 
 func TestNewCreateCommandWithWarnings(t *testing.T) {
 	testCases := []struct {
-		name    string
-		args    []string
-		warning bool
+		name     string
+		args     []string
+		warnings []string
+		warning  bool
 	}{
 		{
-			name: "container-create-without-oom-kill-disable",
+			name: "container-create-no-warnings",
 			args: []string{"image:tag"},
 		},
 		{
-			name: "container-create-oom-kill-disable-false",
-			args: []string{"--oom-kill-disable=false", "image:tag"},
+			name:     "container-create-daemon-single-warning",
+			args:     []string{"image:tag"},
+			warnings: []string{"warning from daemon"},
 		},
 		{
-			name:    "container-create-oom-kill-without-memory-limit",
-			args:    []string{"--oom-kill-disable", "image:tag"},
-			warning: true,
-		},
-		{
-			name:    "container-create-oom-kill-true-without-memory-limit",
-			args:    []string{"--oom-kill-disable=true", "image:tag"},
-			warning: true,
-		},
-		{
-			name: "container-create-oom-kill-true-with-memory-limit",
-			args: []string{"--oom-kill-disable=true", "--memory=100M", "image:tag"},
-		},
-		{
-			name:    "container-create-localhost-dns",
-			args:    []string{"--dns=127.0.0.11", "image:tag"},
-			warning: true,
-		},
-		{
-			name:    "container-create-localhost-dns-ipv6",
-			args:    []string{"--dns=::1", "image:tag"},
-			warning: true,
+			name:     "container-create-daemon-multiple-warnings",
+			args:     []string{"image:tag"},
+			warnings: []string{"warning from daemon", "another warning from daemon"},
 		},
 	}
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			cli := test.NewFakeCli(&fakeClient{
-				createContainerFunc: func(config *container.Config,
-					hostConfig *container.HostConfig,
-					networkingConfig *network.NetworkingConfig,
-					platform *specs.Platform,
-					containerName string,
-				) (container.ContainerCreateCreatedBody, error) {
-					return container.ContainerCreateCreatedBody{}, nil
+			fakeCLI := test.NewFakeCli(&fakeClient{
+				createContainerFunc: func(options client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+					return client.ContainerCreateResult{Warnings: tc.warnings}, nil
 				},
 			})
-			cmd := NewCreateCommand(cli)
-			cmd.SetOut(ioutil.Discard)
+			cmd := newCreateCommand(fakeCLI)
+			cmd.SetOut(io.Discard)
 			cmd.SetArgs(tc.args)
 			err := cmd.Execute()
 			assert.NilError(t, err)
-			if tc.warning {
-				golden.Assert(t, cli.ErrBuffer().String(), tc.name+".golden")
+			if tc.warning || len(tc.warnings) > 0 {
+				golden.Assert(t, fakeCLI.ErrBuffer().String(), tc.name+".golden")
 			} else {
-				assert.Equal(t, cli.ErrBuffer().String(), "")
+				assert.Equal(t, fakeCLI.ErrBuffer().String(), "")
 			}
 		})
 	}
@@ -280,21 +284,16 @@ func TestCreateContainerWithProxyConfig(t *testing.T) {
 		"ALL_PROXY=allProxy",
 		"all_proxy=allProxy",
 	}
-	sort.Strings(expected)
 
-	cli := test.NewFakeCli(&fakeClient{
-		createContainerFunc: func(config *container.Config,
-			hostConfig *container.HostConfig,
-			networkingConfig *network.NetworkingConfig,
-			platform *specs.Platform,
-			containerName string,
-		) (container.ContainerCreateCreatedBody, error) {
-			sort.Strings(config.Env)
-			assert.DeepEqual(t, config.Env, expected)
-			return container.ContainerCreateCreatedBody{}, nil
+	fakeCLI := test.NewFakeCli(&fakeClient{
+		createContainerFunc: func(options client.ContainerCreateOptions) (client.ContainerCreateResult, error) {
+			assert.DeepEqual(t, options.Config.Env, expected, cmpopts.SortSlices(func(a, b string) bool {
+				return a < b
+			}))
+			return client.ContainerCreateResult{}, nil
 		},
 	})
-	cli.SetConfigFile(&configfile.ConfigFile{
+	fakeCLI.SetConfigFile(&configfile.ConfigFile{
 		Proxies: map[string]configfile.ProxyConfig{
 			"default": {
 				HTTPProxy:  "httpProxy",
@@ -305,8 +304,8 @@ func TestCreateContainerWithProxyConfig(t *testing.T) {
 			},
 		},
 	})
-	cmd := NewCreateCommand(cli)
-	cmd.SetOut(ioutil.Discard)
+	cmd := newCreateCommand(fakeCLI)
+	cmd.SetOut(io.Discard)
 	cmd.SetArgs([]string{"image:tag"})
 	err := cmd.Execute()
 	assert.NilError(t, err)
@@ -314,5 +313,5 @@ func TestCreateContainerWithProxyConfig(t *testing.T) {
 
 type fakeNotFound struct{}
 
-func (f fakeNotFound) NotFound() bool { return true }
-func (f fakeNotFound) Error() string  { return "error fake not found" }
+func (fakeNotFound) NotFound()     {}
+func (fakeNotFound) Error() string { return "error fake not found" }

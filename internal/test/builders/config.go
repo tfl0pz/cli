@@ -3,7 +3,7 @@ package builders
 import (
 	"time"
 
-	"github.com/docker/docker/api/types/swarm"
+	"github.com/moby/moby/api/types/swarm"
 )
 
 // Config creates a config with default values.
@@ -33,9 +33,9 @@ func ConfigName(name string) func(config *swarm.Config) {
 }
 
 // ConfigID sets the config's ID
-func ConfigID(ID string) func(config *swarm.Config) {
+func ConfigID(id string) func(config *swarm.Config) {
 	return func(config *swarm.Config) {
-		config.ID = ID
+		config.ID = id
 	}
 }
 

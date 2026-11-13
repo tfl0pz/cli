@@ -1,3 +1,6 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package service
 
 import (
@@ -8,7 +11,8 @@ import (
 	"testing"
 
 	"github.com/docker/cli/cli/command/formatter"
-	"github.com/docker/docker/api/types/swarm"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/golden"
@@ -29,13 +33,11 @@ func TestServiceContextWrite(t *testing.T) {
 		// Errors
 		{
 			formatter.Context{Format: "{{InvalidFunction}}"},
-			`Template parsing error: template: :1: function "InvalidFunction" not defined
-`,
+			`template parsing error: template: :1: function "InvalidFunction" not defined`,
 		},
 		{
 			formatter.Context{Format: "{{nil}}"},
-			`Template parsing error: template: :1:2: executing "" at <nil>: nil is not a command
-`,
+			`template parsing error: template: :1:2: executing "" at <nil>: nil is not a command`,
 		},
 		// Table format
 		{
@@ -109,120 +111,121 @@ zarp2
 		},
 	}
 
-	services := []swarm.Service{
-		{
-			ID: "01_baz",
-			Spec: swarm.ServiceSpec{
-				Annotations: swarm.Annotations{Name: "baz"},
-				Mode: swarm.ServiceMode{
-					Global: &swarm.GlobalService{},
-				},
-			},
-			Endpoint: swarm.Endpoint{
-				Ports: []swarm.PortConfig{
-					{
-						PublishMode:   "ingress",
-						PublishedPort: 80,
-						TargetPort:    8080,
-						Protocol:      "tcp",
+	services := client.ServiceListResult{
+		Items: []swarm.Service{
+			{
+				ID: "01_baz",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "baz"},
+					Mode: swarm.ServiceMode{
+						Global: &swarm.GlobalService{},
 					},
 				},
-			},
-			ServiceStatus: &swarm.ServiceStatus{
-				RunningTasks: 1,
-				DesiredTasks: 3,
-			},
-		},
-		{
-			ID: "02_bar",
-			Spec: swarm.ServiceSpec{
-				Annotations: swarm.Annotations{Name: "bar"},
-				Mode: swarm.ServiceMode{
-					Replicated: &swarm.ReplicatedService{},
-				},
-			},
-			Endpoint: swarm.Endpoint{
-				Ports: []swarm.PortConfig{
-					{
-						PublishMode:   "ingress",
-						PublishedPort: 80,
-						TargetPort:    8090,
-						Protocol:      "udp",
+				Endpoint: swarm.Endpoint{
+					Ports: []swarm.PortConfig{
+						{
+							PublishMode:   "ingress",
+							PublishedPort: 80,
+							TargetPort:    8080,
+							Protocol:      "tcp",
+						},
 					},
 				},
-			},
-			ServiceStatus: &swarm.ServiceStatus{
-				RunningTasks: 2,
-				DesiredTasks: 4,
-			},
-		},
-		{
-			ID: "03_qux10",
-			Spec: swarm.ServiceSpec{
-				Annotations: swarm.Annotations{Name: "qux10"},
-				Mode: swarm.ServiceMode{
-					Replicated: &swarm.ReplicatedService{},
-				},
-				TaskTemplate: swarm.TaskSpec{
-					Placement: &swarm.Placement{MaxReplicas: 1},
+				ServiceStatus: &swarm.ServiceStatus{
+					RunningTasks: 1,
+					DesiredTasks: 3,
 				},
 			},
-			ServiceStatus: &swarm.ServiceStatus{
-				RunningTasks: 2,
-				DesiredTasks: 3,
-			},
-		},
-		{
-			ID: "04_qux2",
-			Spec: swarm.ServiceSpec{
-				Annotations: swarm.Annotations{Name: "qux2"},
-				Mode: swarm.ServiceMode{
-					Replicated: &swarm.ReplicatedService{},
-				},
-				TaskTemplate: swarm.TaskSpec{
-					Placement: &swarm.Placement{MaxReplicas: 2},
-				},
-			},
-			ServiceStatus: &swarm.ServiceStatus{
-				RunningTasks: 3,
-				DesiredTasks: 3,
-			},
-		},
-		{
-			ID: "05_job1",
-			Spec: swarm.ServiceSpec{
-				Annotations: swarm.Annotations{Name: "zarp1"},
-				Mode: swarm.ServiceMode{
-					ReplicatedJob: &swarm.ReplicatedJob{
-						MaxConcurrent:    &varThree,
-						TotalCompletions: &varTen,
+			{
+				ID: "02_bar",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "bar"},
+					Mode: swarm.ServiceMode{
+						Replicated: &swarm.ReplicatedService{},
 					},
 				},
-			},
-			ServiceStatus: &swarm.ServiceStatus{
-				RunningTasks:   2,
-				DesiredTasks:   3,
-				CompletedTasks: 5,
-			},
-		},
-		{
-			ID: "06_job2",
-			Spec: swarm.ServiceSpec{
-				Annotations: swarm.Annotations{Name: "zarp2"},
-				Mode: swarm.ServiceMode{
-					GlobalJob: &swarm.GlobalJob{},
+				Endpoint: swarm.Endpoint{
+					Ports: []swarm.PortConfig{
+						{
+							PublishMode:   "ingress",
+							PublishedPort: 80,
+							TargetPort:    8090,
+							Protocol:      "udp",
+						},
+					},
+				},
+				ServiceStatus: &swarm.ServiceStatus{
+					RunningTasks: 2,
+					DesiredTasks: 4,
 				},
 			},
-			ServiceStatus: &swarm.ServiceStatus{
-				RunningTasks:   1,
-				DesiredTasks:   1,
-				CompletedTasks: 3,
+			{
+				ID: "03_qux10",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "qux10"},
+					Mode: swarm.ServiceMode{
+						Replicated: &swarm.ReplicatedService{},
+					},
+					TaskTemplate: swarm.TaskSpec{
+						Placement: &swarm.Placement{MaxReplicas: 1},
+					},
+				},
+				ServiceStatus: &swarm.ServiceStatus{
+					RunningTasks: 2,
+					DesiredTasks: 3,
+				},
+			},
+			{
+				ID: "04_qux2",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "qux2"},
+					Mode: swarm.ServiceMode{
+						Replicated: &swarm.ReplicatedService{},
+					},
+					TaskTemplate: swarm.TaskSpec{
+						Placement: &swarm.Placement{MaxReplicas: 2},
+					},
+				},
+				ServiceStatus: &swarm.ServiceStatus{
+					RunningTasks: 3,
+					DesiredTasks: 3,
+				},
+			},
+			{
+				ID: "05_job1",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "zarp1"},
+					Mode: swarm.ServiceMode{
+						ReplicatedJob: &swarm.ReplicatedJob{
+							MaxConcurrent:    &varThree,
+							TotalCompletions: &varTen,
+						},
+					},
+				},
+				ServiceStatus: &swarm.ServiceStatus{
+					RunningTasks:   2,
+					DesiredTasks:   3,
+					CompletedTasks: 5,
+				},
+			},
+			{
+				ID: "06_job2",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "zarp2"},
+					Mode: swarm.ServiceMode{
+						GlobalJob: &swarm.GlobalJob{},
+					},
+				},
+				ServiceStatus: &swarm.ServiceStatus{
+					RunningTasks:   1,
+					DesiredTasks:   1,
+					CompletedTasks: 3,
+				},
 			},
 		},
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(string(tc.context.Format), func(t *testing.T) {
 			var out bytes.Buffer
 			tc.context.Output = &out
@@ -237,55 +240,57 @@ zarp2
 }
 
 func TestServiceContextWriteJSON(t *testing.T) {
-	services := []swarm.Service{
-		{
-			ID: "01_baz",
-			Spec: swarm.ServiceSpec{
-				Annotations: swarm.Annotations{Name: "baz"},
-				Mode: swarm.ServiceMode{
-					Global: &swarm.GlobalService{},
-				},
-			},
-			Endpoint: swarm.Endpoint{
-				Ports: []swarm.PortConfig{
-					{
-						PublishMode:   "ingress",
-						PublishedPort: 80,
-						TargetPort:    8080,
-						Protocol:      "tcp",
+	services := client.ServiceListResult{
+		Items: []swarm.Service{
+			{
+				ID: "01_baz",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "baz"},
+					Mode: swarm.ServiceMode{
+						Global: &swarm.GlobalService{},
 					},
 				},
-			},
-			ServiceStatus: &swarm.ServiceStatus{
-				RunningTasks: 1,
-				DesiredTasks: 3,
-			},
-		},
-		{
-			ID: "02_bar",
-			Spec: swarm.ServiceSpec{
-				Annotations: swarm.Annotations{Name: "bar"},
-				Mode: swarm.ServiceMode{
-					Replicated: &swarm.ReplicatedService{},
-				},
-			},
-			Endpoint: swarm.Endpoint{
-				Ports: []swarm.PortConfig{
-					{
-						PublishMode:   "ingress",
-						PublishedPort: 80,
-						TargetPort:    8080,
-						Protocol:      "tcp",
+				Endpoint: swarm.Endpoint{
+					Ports: []swarm.PortConfig{
+						{
+							PublishMode:   "ingress",
+							PublishedPort: 80,
+							TargetPort:    8080,
+							Protocol:      "tcp",
+						},
 					},
 				},
+				ServiceStatus: &swarm.ServiceStatus{
+					RunningTasks: 1,
+					DesiredTasks: 3,
+				},
 			},
-			ServiceStatus: &swarm.ServiceStatus{
-				RunningTasks: 2,
-				DesiredTasks: 4,
+			{
+				ID: "02_bar",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "bar"},
+					Mode: swarm.ServiceMode{
+						Replicated: &swarm.ReplicatedService{},
+					},
+				},
+				Endpoint: swarm.Endpoint{
+					Ports: []swarm.PortConfig{
+						{
+							PublishMode:   "ingress",
+							PublishedPort: 80,
+							TargetPort:    8080,
+							Protocol:      "tcp",
+						},
+					},
+				},
+				ServiceStatus: &swarm.ServiceStatus{
+					RunningTasks: 2,
+					DesiredTasks: 4,
+				},
 			},
 		},
 	}
-	expectedJSONs := []map[string]interface{}{
+	expectedJSONs := []map[string]any{
 		{"ID": "02_bar", "Name": "bar", "Mode": "replicated", "Replicas": "2/4", "Image": "", "Ports": "*:80->8080/tcp"},
 		{"ID": "01_baz", "Name": "baz", "Mode": "global", "Replicas": "1/3", "Image": "", "Ports": "*:80->8080/tcp"},
 	}
@@ -297,38 +302,41 @@ func TestServiceContextWriteJSON(t *testing.T) {
 	}
 	for i, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
 		msg := fmt.Sprintf("Output: line %d: %s", i, line)
-		var m map[string]interface{}
+		var m map[string]any
 		err := json.Unmarshal([]byte(line), &m)
 		assert.NilError(t, err, msg)
 		assert.Check(t, is.DeepEqual(expectedJSONs[i], m), msg)
 	}
 }
+
 func TestServiceContextWriteJSONField(t *testing.T) {
-	services := []swarm.Service{
-		{
-			ID: "01_baz",
-			Spec: swarm.ServiceSpec{
-				Annotations: swarm.Annotations{Name: "baz"},
-				Mode: swarm.ServiceMode{
-					Global: &swarm.GlobalService{},
+	services := client.ServiceListResult{
+		Items: []swarm.Service{
+			{
+				ID: "01_baz",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "baz"},
+					Mode: swarm.ServiceMode{
+						Global: &swarm.GlobalService{},
+					},
+				},
+				ServiceStatus: &swarm.ServiceStatus{
+					RunningTasks: 2,
+					DesiredTasks: 4,
 				},
 			},
-			ServiceStatus: &swarm.ServiceStatus{
-				RunningTasks: 2,
-				DesiredTasks: 4,
-			},
-		},
-		{
-			ID: "24_bar",
-			Spec: swarm.ServiceSpec{
-				Annotations: swarm.Annotations{Name: "bar"},
-				Mode: swarm.ServiceMode{
-					Replicated: &swarm.ReplicatedService{},
+			{
+				ID: "24_bar",
+				Spec: swarm.ServiceSpec{
+					Annotations: swarm.Annotations{Name: "bar"},
+					Mode: swarm.ServiceMode{
+						Replicated: &swarm.ReplicatedService{},
+					},
 				},
-			},
-			ServiceStatus: &swarm.ServiceStatus{
-				RunningTasks: 2,
-				DesiredTasks: 4,
+				ServiceStatus: &swarm.ServiceStatus{
+					RunningTasks: 2,
+					DesiredTasks: 4,
+				},
 			},
 		},
 	}
@@ -342,7 +350,7 @@ func TestServiceContextWriteJSONField(t *testing.T) {
 		var s string
 		err := json.Unmarshal([]byte(line), &s)
 		assert.NilError(t, err, msg)
-		assert.Check(t, is.Equal(services[i].Spec.Name, s), msg)
+		assert.Check(t, is.Equal(services.Items[i].Spec.Name, s), msg)
 	}
 }
 

@@ -1,22 +1,27 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package service
 
 import (
+	"cmp"
+	"errors"
 	"fmt"
-	"sort"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/distribution/reference"
 	"github.com/docker/cli/cli/command/formatter"
 	"github.com/docker/cli/cli/command/inspect"
-	"github.com/docker/distribution/reference"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	mounttypes "github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/pkg/stringid"
-	units "github.com/docker/go-units"
+	"github.com/docker/go-units"
 	"github.com/fvbommel/sortorder"
-	"github.com/pkg/errors"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/mount"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 )
 
 const serviceInspectPrettyTemplate formatter.Format = `
@@ -195,8 +200,8 @@ Ports:
 {{- end }}
 `
 
-// NewFormat returns a Format for rendering using a Context
-func NewFormat(source string) formatter.Format {
+// newFormat returns a Format for rendering using a Context.
+func newFormat(source string) formatter.Format {
 	switch source {
 	case formatter.PrettyFormatKey:
 		return serviceInspectPrettyTemplate
@@ -207,9 +212,9 @@ func NewFormat(source string) formatter.Format {
 
 func resolveNetworks(service swarm.Service, getNetwork inspect.GetRefFunc) map[string]string {
 	networkNames := make(map[string]string)
-	for _, network := range service.Spec.TaskTemplate.Networks {
-		if resolved, _, err := getNetwork(network.Target); err == nil {
-			if resolvedNetwork, ok := resolved.(types.NetworkResource); ok {
+	for _, nw := range service.Spec.TaskTemplate.Networks {
+		if resolved, _, err := getNetwork(nw.Target); err == nil {
+			if resolvedNetwork, ok := resolved.(network.Summary); ok {
 				networkNames[resolvedNetwork.ID] = resolvedNetwork.Name
 			}
 		}
@@ -217,12 +222,13 @@ func resolveNetworks(service swarm.Service, getNetwork inspect.GetRefFunc) map[s
 	return networkNames
 }
 
-// InspectFormatWrite renders the context for a list of services
-func InspectFormatWrite(ctx formatter.Context, refs []string, getRef, getNetwork inspect.GetRefFunc) error {
-	if ctx.Format != serviceInspectPrettyTemplate {
-		return inspect.Inspect(ctx.Output, refs, string(ctx.Format), getRef)
+// inspectFormatWrite renders the context for a list of services
+func inspectFormatWrite(fmtCtx formatter.Context, refs []string, getRef, getNetwork inspect.GetRefFunc) error {
+	if fmtCtx.Format != serviceInspectPrettyTemplate {
+		return inspect.Inspect(fmtCtx.Output, refs, string(fmtCtx.Format), getRef)
 	}
-	render := func(format func(subContext formatter.SubContext) error) error {
+
+	return fmtCtx.Write(&serviceInspectContext{}, func(format func(subContext formatter.SubContext) error) error {
 		for _, ref := range refs {
 			serviceI, _, err := getRef(ref)
 			if err != nil {
@@ -230,15 +236,17 @@ func InspectFormatWrite(ctx formatter.Context, refs []string, getRef, getNetwork
 			}
 			service, ok := serviceI.(swarm.Service)
 			if !ok {
-				return errors.Errorf("got wrong object to inspect")
+				return errors.New("got wrong object to inspect")
 			}
-			if err := format(&serviceInspectContext{Service: service, networkNames: resolveNetworks(service, getNetwork)}); err != nil {
+			if err := format(&serviceInspectContext{
+				Service:      service,
+				networkNames: resolveNetworks(service, getNetwork),
+			}); err != nil {
 				return err
 			}
 		}
 		return nil
-	}
-	return ctx.Write(&serviceInspectContext{}, render)
+	})
 }
 
 type serviceInspectContext struct {
@@ -273,6 +281,7 @@ func (ctx *serviceInspectContext) HasLogDriver() bool {
 func (ctx *serviceInspectContext) HasLogDriverName() bool {
 	return ctx.Service.Spec.TaskTemplate.LogDriver.Name != ""
 }
+
 func (ctx *serviceInspectContext) LogDriverName() string {
 	return ctx.Service.Spec.TaskTemplate.LogDriver.Name
 }
@@ -344,13 +353,13 @@ func (ctx *serviceInspectContext) TaskPlacementPreferences() []string {
 	if ctx.Service.Spec.TaskTemplate.Placement == nil {
 		return nil
 	}
-	var strings []string
+	var out []string
 	for _, pref := range ctx.Service.Spec.TaskTemplate.Placement.Preferences {
 		if pref.Spread != nil {
-			strings = append(strings, "spread="+pref.Spread.SpreadDescriptor)
+			out = append(out, "spread="+pref.Spread.SpreadDescriptor)
 		}
 	}
-	return strings
+	return out
 }
 
 func (ctx *serviceInspectContext) MaxReplicas() uint64 {
@@ -377,11 +386,11 @@ func (ctx *serviceInspectContext) UpdateDelay() time.Duration {
 }
 
 func (ctx *serviceInspectContext) UpdateOnFailure() string {
-	return ctx.Service.Spec.UpdateConfig.FailureAction
+	return string(ctx.Service.Spec.UpdateConfig.FailureAction)
 }
 
 func (ctx *serviceInspectContext) UpdateOrder() string {
-	return ctx.Service.Spec.UpdateConfig.Order
+	return string(ctx.Service.Spec.UpdateConfig.Order)
 }
 
 func (ctx *serviceInspectContext) HasUpdateMonitor() bool {
@@ -413,7 +422,7 @@ func (ctx *serviceInspectContext) RollbackDelay() time.Duration {
 }
 
 func (ctx *serviceInspectContext) RollbackOnFailure() string {
-	return ctx.Service.Spec.RollbackConfig.FailureAction
+	return string(ctx.Service.Spec.RollbackConfig.FailureAction)
 }
 
 func (ctx *serviceInspectContext) HasRollbackMonitor() bool {
@@ -429,7 +438,7 @@ func (ctx *serviceInspectContext) RollbackMaxFailureRatio() float32 {
 }
 
 func (ctx *serviceInspectContext) RollbackOrder() string {
-	return ctx.Service.Spec.RollbackConfig.Order
+	return string(ctx.Service.Spec.RollbackConfig.Order)
 }
 
 func (ctx *serviceInspectContext) ContainerImage() string {
@@ -460,7 +469,7 @@ func (ctx *serviceInspectContext) ContainerInit() bool {
 	return *ctx.Service.Spec.TaskTemplate.ContainerSpec.Init
 }
 
-func (ctx *serviceInspectContext) ContainerMounts() []mounttypes.Mount {
+func (ctx *serviceInspectContext) ContainerMounts() []mount.Mount {
 	return ctx.Service.Spec.TaskTemplate.ContainerSpec.Mounts
 }
 
@@ -501,7 +510,8 @@ func (ctx *serviceInspectContext) ResourceReservationNanoCPUs() float64 {
 	if ctx.Service.Spec.TaskTemplate.Resources.Reservations.NanoCPUs == 0 {
 		return float64(0)
 	}
-	return float64(ctx.Service.Spec.TaskTemplate.Resources.Reservations.NanoCPUs) / 1e9
+	const nano = 1e9
+	return float64(ctx.Service.Spec.TaskTemplate.Resources.Reservations.NanoCPUs) / nano
 }
 
 func (ctx *serviceInspectContext) ResourceReservationMemory() string {
@@ -519,7 +529,8 @@ func (ctx *serviceInspectContext) HasResourceLimits() bool {
 }
 
 func (ctx *serviceInspectContext) ResourceLimitsNanoCPUs() float64 {
-	return float64(ctx.Service.Spec.TaskTemplate.Resources.Limits.NanoCPUs) / 1e9
+	const nano = 1e9
+	return float64(ctx.Service.Spec.TaskTemplate.Resources.Limits.NanoCPUs) / nano
 }
 
 func (ctx *serviceInspectContext) ResourceLimitMemory() string {
@@ -606,12 +617,12 @@ func NewListFormat(source string, quiet bool) formatter.Format {
 }
 
 // ListFormatWrite writes the context
-func ListFormatWrite(ctx formatter.Context, services []swarm.Service) error {
+func ListFormatWrite(ctx formatter.Context, services client.ServiceListResult) error {
 	render := func(format func(subContext formatter.SubContext) error) error {
-		sort.Slice(services, func(i, j int) bool {
-			return sortorder.NaturalLess(services[i].Spec.Name, services[j].Spec.Name)
+		slices.SortFunc(services.Items, func(a, b swarm.Service) int {
+			return sortorder.NaturalCompare(a.Spec.Name, b.Spec.Name)
 		})
-		for _, service := range services {
+		for _, service := range services.Items {
 			serviceCtx := &serviceContext{service: service}
 			if err := format(serviceCtx); err != nil {
 				return err
@@ -641,7 +652,7 @@ func (c *serviceContext) MarshalJSON() ([]byte, error) {
 }
 
 func (c *serviceContext) ID() string {
-	return stringid.TruncateID(c.service.ID)
+	return formatter.TruncateID(c.service.ID)
 }
 
 func (c *serviceContext) Name() string {
@@ -729,7 +740,7 @@ type portRange struct {
 	pEnd     uint32
 	tStart   uint32
 	tEnd     uint32
-	protocol swarm.PortConfigProtocol
+	protocol network.IPProtocol
 }
 
 func (pr portRange) String() string {
@@ -741,12 +752,12 @@ func (pr portRange) String() string {
 	if pr.pEnd > pr.pStart {
 		pub = fmt.Sprintf("%d-%d", pr.pStart, pr.pEnd)
 	} else {
-		pub = fmt.Sprintf("%d", pr.pStart)
+		pub = strconv.FormatUint(uint64(pr.pStart), 10)
 	}
 	if pr.tEnd > pr.tStart {
 		tgt = fmt.Sprintf("%d-%d", pr.tStart, pr.tEnd)
 	} else {
-		tgt = fmt.Sprintf("%d", pr.tStart)
+		tgt = strconv.FormatUint(uint64(pr.tStart), 10)
 	}
 	return fmt.Sprintf("*:%s->%s/%s", pub, tgt, pr.protocol)
 }
@@ -768,17 +779,16 @@ func (c *serviceContext) Ports() string {
 		return ""
 	}
 
-	pr := portRange{}
-	ports := []string{}
-
-	servicePorts := c.service.Endpoint.Ports
-	sort.Slice(servicePorts, func(i, j int) bool {
-		if servicePorts[i].Protocol == servicePorts[j].Protocol {
-			return servicePorts[i].PublishedPort < servicePorts[j].PublishedPort
-		}
-		return servicePorts[i].Protocol < servicePorts[j].Protocol
+	// Sort by protocol first, then by published port.
+	slices.SortFunc(c.service.Endpoint.Ports, func(a, b swarm.PortConfig) int {
+		return cmp.Or(
+			cmp.Compare(a.Protocol, b.Protocol),
+			cmp.Compare(a.PublishedPort, b.PublishedPort),
+		)
 	})
 
+	var pr portRange
+	var ports []string
 	for _, p := range c.service.Endpoint.Ports {
 		if p.PublishMode == swarm.PortConfigPublishModeIngress {
 			prIsRange := pr.tEnd != pr.tStart

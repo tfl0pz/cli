@@ -1,13 +1,12 @@
 package formatter
 
 import (
-	"fmt"
+	"strconv"
 	"time"
 
-	"github.com/docker/distribution/reference"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/pkg/stringid"
-	units "github.com/docker/go-units"
+	"github.com/distribution/reference"
+	"github.com/docker/go-units"
+	"github.com/moby/moby/api/types/image"
 )
 
 const (
@@ -26,8 +25,11 @@ type ImageContext struct {
 	Digest bool
 }
 
-func isDangling(image types.ImageSummary) bool {
-	return len(image.RepoTags) == 1 && image.RepoTags[0] == "<none>:<none>" && len(image.RepoDigests) == 1 && image.RepoDigests[0] == "<none>@<none>"
+func isDangling(img image.Summary) bool {
+	if len(img.RepoTags) == 0 && len(img.RepoDigests) == 0 {
+		return true
+	}
+	return len(img.RepoTags) == 1 && img.RepoTags[0] == "<none>:<none>" && len(img.RepoDigests) == 1 && img.RepoDigests[0] == "<none>@<none>"
 }
 
 // NewImageFormat returns a format for rendering an ImageContext
@@ -72,7 +74,7 @@ virtual_size: {{.Size}}
 }
 
 // ImageWrite writes the formatter images using the ImageContext
-func ImageWrite(ctx ImageContext, images []types.ImageSummary) error {
+func ImageWrite(ctx ImageContext, images []image.Summary) error {
 	render := func(format func(subContext SubContext) error) error {
 		return imageFormat(ctx, images, format)
 	}
@@ -84,19 +86,19 @@ func needDigest(ctx ImageContext) bool {
 	return ctx.Digest || ctx.Format.Contains("{{.Digest}}")
 }
 
-func imageFormat(ctx ImageContext, images []types.ImageSummary, format func(subContext SubContext) error) error {
-	for _, image := range images {
+func imageFormat(ctx ImageContext, images []image.Summary, format func(subContext SubContext) error) error {
+	for _, img := range images {
 		formatted := []*imageContext{}
-		if isDangling(image) {
+		if isDangling(img) {
 			formatted = append(formatted, &imageContext{
 				trunc:  ctx.Trunc,
-				i:      image,
+				i:      img,
 				repo:   "<none>",
 				tag:    "<none>",
 				digest: "<none>",
 			})
 		} else {
-			formatted = imageFormatTaggedAndDigest(ctx, image)
+			formatted = imageFormatTaggedAndDigest(ctx, img)
 		}
 		for _, imageCtx := range formatted {
 			if err := format(imageCtx); err != nil {
@@ -107,12 +109,12 @@ func imageFormat(ctx ImageContext, images []types.ImageSummary, format func(subC
 	return nil
 }
 
-func imageFormatTaggedAndDigest(ctx ImageContext, image types.ImageSummary) []*imageContext {
+func imageFormatTaggedAndDigest(ctx ImageContext, img image.Summary) []*imageContext {
 	repoTags := map[string][]string{}
 	repoDigests := map[string][]string{}
 	images := []*imageContext{}
 
-	for _, refString := range image.RepoTags {
+	for _, refString := range img.RepoTags {
 		ref, err := reference.ParseNormalizedNamed(refString)
 		if err != nil {
 			continue
@@ -122,7 +124,7 @@ func imageFormatTaggedAndDigest(ctx ImageContext, image types.ImageSummary) []*i
 			repoTags[familiarRef] = append(repoTags[familiarRef], nt.Tag())
 		}
 	}
-	for _, refString := range image.RepoDigests {
+	for _, refString := range img.RepoDigests {
 		ref, err := reference.ParseNormalizedNamed(refString)
 		if err != nil {
 			continue
@@ -134,14 +136,13 @@ func imageFormatTaggedAndDigest(ctx ImageContext, image types.ImageSummary) []*i
 	}
 
 	addImage := func(repo, tag, digest string) {
-		image := &imageContext{
+		images = append(images, &imageContext{
 			trunc:  ctx.Trunc,
-			i:      image,
+			i:      img,
 			repo:   repo,
 			tag:    tag,
 			digest: digest,
-		}
-		images = append(images, image)
+		})
 	}
 
 	for repo, tags := range repoTags {
@@ -164,7 +165,6 @@ func imageFormatTaggedAndDigest(ctx ImageContext, image types.ImageSummary) []*i
 			for _, dgst := range digests {
 				addImage(repo, tag, dgst)
 			}
-
 		}
 	}
 
@@ -177,7 +177,6 @@ func imageFormatTaggedAndDigest(ctx ImageContext, image types.ImageSummary) []*i
 			}
 		} else {
 			addImage(repo, "<none>", "")
-
 		}
 	}
 	return images
@@ -186,7 +185,7 @@ func imageFormatTaggedAndDigest(ctx ImageContext, image types.ImageSummary) []*i
 type imageContext struct {
 	HeaderContext
 	trunc  bool
-	i      types.ImageSummary
+	i      image.Summary
 	repo   string
 	tag    string
 	digest string
@@ -203,7 +202,6 @@ func newImageContext() *imageContext {
 		"CreatedAt":    CreatedAtHeader,
 		"Size":         SizeHeader,
 		"Containers":   containersHeader,
-		"VirtualSize":  SizeHeader,
 		"SharedSize":   sharedSizeHeader,
 		"UniqueSize":   uniqueSizeHeader,
 	}
@@ -216,7 +214,7 @@ func (c *imageContext) MarshalJSON() ([]byte, error) {
 
 func (c *imageContext) ID() string {
 	if c.trunc {
-		return stringid.TruncateID(c.i.ID)
+		return TruncateID(c.i.ID)
 	}
 	return c.i.ID
 }
@@ -255,11 +253,7 @@ func (c *imageContext) Containers() string {
 	if c.i.Containers == -1 {
 		return "N/A"
 	}
-	return fmt.Sprintf("%d", c.i.Containers)
-}
-
-func (c *imageContext) VirtualSize() string {
-	return units.HumanSize(float64(c.i.VirtualSize))
+	return strconv.FormatInt(c.i.Containers, 10)
 }
 
 func (c *imageContext) SharedSize() string {
@@ -270,8 +264,8 @@ func (c *imageContext) SharedSize() string {
 }
 
 func (c *imageContext) UniqueSize() string {
-	if c.i.VirtualSize == -1 || c.i.SharedSize == -1 {
+	if c.i.Size == -1 || c.i.SharedSize == -1 {
 		return "N/A"
 	}
-	return units.HumanSize(float64(c.i.VirtualSize - c.i.SharedSize))
+	return units.HumanSize(float64(c.i.Size - c.i.SharedSize))
 }

@@ -5,8 +5,8 @@ import (
 	"testing"
 
 	"github.com/docker/cli/cli/command/formatter"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/pkg/archive"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 )
 
@@ -17,7 +17,7 @@ func TestDiffContextFormatWrite(t *testing.T) {
 		expected string
 	}{
 		{
-			formatter.Context{Format: NewDiffFormat("table")},
+			formatter.Context{Format: newDiffFormat("table")},
 			`CHANGE TYPE   PATH
 C             /var/log/app.log
 A             /usr/app/app.js
@@ -25,7 +25,7 @@ D             /usr/app/old_app.js
 `,
 		},
 		{
-			formatter.Context{Format: NewDiffFormat("table {{.Path}}")},
+			formatter.Context{Format: newDiffFormat("table {{.Path}}")},
 			`PATH
 /var/log/app.log
 /usr/app/app.js
@@ -33,7 +33,7 @@ D             /usr/app/old_app.js
 `,
 		},
 		{
-			formatter.Context{Format: NewDiffFormat("{{.Type}}: {{.Path}}")},
+			formatter.Context{Format: newDiffFormat("{{.Type}}: {{.Path}}")},
 			`C: /var/log/app.log
 A: /usr/app/app.js
 D: /usr/app/old_app.js
@@ -41,18 +41,19 @@ D: /usr/app/old_app.js
 		},
 	}
 
-	diffs := []container.ContainerChangeResponseItem{
-		{Kind: archive.ChangeModify, Path: "/var/log/app.log"},
-		{Kind: archive.ChangeAdd, Path: "/usr/app/app.js"},
-		{Kind: archive.ChangeDelete, Path: "/usr/app/old_app.js"},
+	diffs := client.ContainerDiffResult{
+		Changes: []container.FilesystemChange{
+			{Kind: container.ChangeModify, Path: "/var/log/app.log"},
+			{Kind: container.ChangeAdd, Path: "/usr/app/app.js"},
+			{Kind: container.ChangeDelete, Path: "/usr/app/old_app.js"},
+		},
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(string(tc.context.Format), func(t *testing.T) {
 			out := bytes.NewBufferString("")
 			tc.context.Output = out
-			err := DiffFormatWrite(tc.context, diffs)
+			err := diffFormatWrite(tc.context, diffs)
 			if err != nil {
 				assert.Error(t, err, tc.expected)
 			} else {

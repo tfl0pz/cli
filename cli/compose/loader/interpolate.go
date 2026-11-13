@@ -1,11 +1,15 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package loader
 
 import (
+	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 
 	interp "github.com/docker/cli/cli/compose/interpolation"
-	"github.com/pkg/errors"
 )
 
 var interpolateTypeCastMapping = map[interp.Path]interp.Cast{
@@ -26,47 +30,40 @@ var interpolateTypeCastMapping = map[interp.Path]interp.Cast{
 	servicePath("ulimits", interp.PathMatchAll, "hard"):              toInt,
 	servicePath("ulimits", interp.PathMatchAll, "soft"):              toInt,
 	servicePath("privileged"):                                        toBoolean,
+	servicePath("oom_score_adj"):                                     toInt,
 	servicePath("read_only"):                                         toBoolean,
 	servicePath("stdin_open"):                                        toBoolean,
 	servicePath("tty"):                                               toBoolean,
 	servicePath("volumes", interp.PathMatchList, "read_only"):        toBoolean,
 	servicePath("volumes", interp.PathMatchList, "volume", "nocopy"): toBoolean,
-	iPath("networks", interp.PathMatchAll, "external"):               toBoolean,
-	iPath("networks", interp.PathMatchAll, "internal"):               toBoolean,
-	iPath("networks", interp.PathMatchAll, "attachable"):             toBoolean,
-	iPath("volumes", interp.PathMatchAll, "external"):                toBoolean,
-	iPath("secrets", interp.PathMatchAll, "external"):                toBoolean,
-	iPath("configs", interp.PathMatchAll, "external"):                toBoolean,
-}
-
-func iPath(parts ...string) interp.Path {
-	return interp.NewPath(parts...)
+	interp.NewPath("networks", interp.PathMatchAll, "external"):      toBoolean,
+	interp.NewPath("networks", interp.PathMatchAll, "internal"):      toBoolean,
+	interp.NewPath("networks", interp.PathMatchAll, "attachable"):    toBoolean,
+	interp.NewPath("volumes", interp.PathMatchAll, "external"):       toBoolean,
+	interp.NewPath("secrets", interp.PathMatchAll, "external"):       toBoolean,
+	interp.NewPath("configs", interp.PathMatchAll, "external"):       toBoolean,
 }
 
 func servicePath(parts ...string) interp.Path {
-	return iPath(append([]string{"services", interp.PathMatchAll}, parts...)...)
+	return interp.NewPath(slices.Concat([]string{"services", interp.PathMatchAll}, parts)...)
 }
 
-func toInt(value string) (interface{}, error) {
+func toInt(value string) (any, error) {
 	return strconv.Atoi(value)
 }
 
-func toFloat(value string) (interface{}, error) {
+func toFloat(value string) (any, error) {
 	return strconv.ParseFloat(value, 64)
 }
 
 // should match http://yaml.org/type/bool.html
-func toBoolean(value string) (interface{}, error) {
+func toBoolean(value string) (any, error) {
 	switch strings.ToLower(value) {
 	case "y", "yes", "true", "on":
 		return true, nil
 	case "n", "no", "false", "off":
 		return false, nil
 	default:
-		return nil, errors.Errorf("invalid boolean: %s", value)
+		return nil, fmt.Errorf("invalid boolean: %s", value)
 	}
-}
-
-func interpolateConfig(configDict map[string]interface{}, opts interp.Options) (map[string]interface{}, error) {
-	return interp.Interpolate(configDict, opts)
 }

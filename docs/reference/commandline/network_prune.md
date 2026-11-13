@@ -1,21 +1,17 @@
----
-title: "network prune"
-description: "Remove unused networks"
-keywords: "network, prune, delete"
----
-
 # network prune
 
-```markdown
-Usage:  docker network prune [OPTIONS]
-
+<!---MARKER_GEN_START-->
 Remove all unused networks
 
-Options:
-      --filter filter   Provide filter values (e.g. 'until=<timestamp>')
-  -f, --force           Do not prompt for confirmation
-      --help            Print usage
-```
+### Options
+
+| Name                  | Type     | Default | Description                                      |
+|:----------------------|:---------|:--------|:-------------------------------------------------|
+| [`--filter`](#filter) | `filter` |         | Provide filter values (e.g. `until=<timestamp>`) |
+| `-f`, `--force`       | `bool`   |         | Do not prompt for confirmation                   |
+
+
+<!---MARKER_GEN_END-->
 
 ## Description
 
@@ -34,10 +30,22 @@ n1
 n2
 ```
 
-### Filtering
+### <a name="filter"></a> Filtering (--filter)
 
 The filtering flag (`--filter`) format is of "key=value". If there is more
-than one filter, then pass multiple flags (e.g., `--filter "foo=bar" --filter "bif=baz"`)
+than one filter, then pass multiple flags (e.g., `--filter "foo=bar" --filter "bif=baz"`).
+
+When multiple filters are provided, they are combined as follows:
+
+- Multiple filters with **different keys** are combined using AND logic.
+  A network must satisfy all filter conditions to be pruned.
+- Multiple filters with the **same key** are combined using OR logic.
+  A network is pruned if it matches any of the values for that key.
+
+For example, `--filter "label=foo" --filter "until=24h"` prunes networks
+that have the `foo` label **and** were created more than 24 hours ago.
+Conversely, `--filter "label=foo" --filter "label=bar"` prunes networks
+that have **either** the `foo` **or** `bar` label.
 
 The currently supported filters are:
 
@@ -45,10 +53,10 @@ The currently supported filters are:
 * label (`label=<key>`, `label=<key>=<value>`, `label!=<key>`, or `label!=<key>=<value>`) - only remove networks with (or without, in case `label!=...` is used) the specified labels.
 
 The `until` filter can be Unix timestamps, date formatted
-timestamps, or Go duration strings (e.g. `10m`, `1h30m`) computed
+timestamps, or Go duration strings supported by [ParseDuration](https://pkg.go.dev/time#ParseDuration) (e.g. `10m`, `1h30m`) computed
 relative to the daemon machine’s time. Supported formats for date
 formatted time stamps include RFC3339Nano, RFC3339, `2006-01-02T15:04:05`,
-`2006-01-02T15:04:05.999999999`, `2006-01-02Z07:00`, and `2006-01-02`. The local
+`2006-01-02T15:04:05.999999999`, `2006-01-02T07:00`, and `2006-01-02`. The local
 timezone on the daemon will be used if you do not provide either a `Z` or a
 `+-00:00` timezone offset at the end of the timestamp.  When providing Unix
 timestamps enter seconds[.nanoseconds], where seconds is the number of seconds

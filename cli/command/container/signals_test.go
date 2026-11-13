@@ -6,25 +6,23 @@ import (
 	"testing"
 	"time"
 
-	"github.com/docker/cli/internal/test"
+	"github.com/moby/moby/client"
 	"github.com/moby/sys/signal"
 )
 
 func TestForwardSignals(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	called := make(chan struct{})
-	client := &fakeClient{containerKillFunc: func(ctx context.Context, container, signal string) error {
+	apiClient := &fakeClient{containerKillFunc: func(ctx context.Context, container string, options client.ContainerKillOptions) (client.ContainerKillResult, error) {
 		close(called)
-		return nil
+		return client.ContainerKillResult{}, nil
 	}}
 
-	cli := test.NewFakeCli(client)
 	sigc := make(chan os.Signal)
 	defer close(sigc)
 
-	go ForwardAllSignals(ctx, cli, t.Name(), sigc)
+	go ForwardAllSignals(ctx, apiClient, t.Name(), sigc)
 
 	timer := time.NewTimer(30 * time.Second)
 	defer timer.Stop()
@@ -44,5 +42,4 @@ func TestForwardSignals(t *testing.T) {
 	case <-timer.C:
 		t.Fatal("timeout waiting for signal to be processed")
 	}
-
 }

@@ -1,21 +1,22 @@
 package node
 
 import (
-	"io/ioutil"
+	"errors"
+	"io"
 	"testing"
 
 	"github.com/docker/cli/internal/test"
-	. "github.com/docker/cli/internal/test/builders" // Import builders to get the builder function as package function
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/pkg/errors"
+	"github.com/docker/cli/internal/test/builders"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 )
 
 func TestNodePromoteErrors(t *testing.T) {
 	testCases := []struct {
 		args            []string
-		nodeInspectFunc func() (swarm.Node, []byte, error)
-		nodeUpdateFunc  func(nodeID string, version swarm.Version, node swarm.NodeSpec) error
+		nodeInspectFunc func() (client.NodeInspectResult, error)
+		nodeUpdateFunc  func(nodeID string, options client.NodeUpdateOptions) (client.NodeUpdateResult, error)
 		expectedError   string
 	}{
 		{
@@ -23,15 +24,15 @@ func TestNodePromoteErrors(t *testing.T) {
 		},
 		{
 			args: []string{"nodeID"},
-			nodeInspectFunc: func() (swarm.Node, []byte, error) {
-				return swarm.Node{}, []byte{}, errors.Errorf("error inspecting the node")
+			nodeInspectFunc: func() (client.NodeInspectResult, error) {
+				return client.NodeInspectResult{}, errors.New("error inspecting the node")
 			},
 			expectedError: "error inspecting the node",
 		},
 		{
 			args: []string{"nodeID"},
-			nodeUpdateFunc: func(nodeID string, version swarm.Version, node swarm.NodeSpec) error {
-				return errors.Errorf("error updating the node")
+			nodeUpdateFunc: func(nodeID string, options client.NodeUpdateOptions) (client.NodeUpdateResult, error) {
+				return client.NodeUpdateResult{}, errors.New("error updating the node")
 			},
 			expectedError: "error updating the node",
 		},
@@ -43,7 +44,8 @@ func TestNodePromoteErrors(t *testing.T) {
 				nodeUpdateFunc:  tc.nodeUpdateFunc,
 			}))
 		cmd.SetArgs(tc.args)
-		cmd.SetOut(ioutil.Discard)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
 		assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
 	}
 }
@@ -51,14 +53,16 @@ func TestNodePromoteErrors(t *testing.T) {
 func TestNodePromoteNoChange(t *testing.T) {
 	cmd := newPromoteCommand(
 		test.NewFakeCli(&fakeClient{
-			nodeInspectFunc: func() (swarm.Node, []byte, error) {
-				return *Node(Manager()), []byte{}, nil
+			nodeInspectFunc: func() (client.NodeInspectResult, error) {
+				return client.NodeInspectResult{
+					Node: *builders.Node(builders.Manager()),
+				}, nil
 			},
-			nodeUpdateFunc: func(nodeID string, version swarm.Version, node swarm.NodeSpec) error {
-				if node.Role != swarm.NodeRoleManager {
-					return errors.Errorf("expected role manager, got %s", node.Role)
+			nodeUpdateFunc: func(nodeID string, options client.NodeUpdateOptions) (client.NodeUpdateResult, error) {
+				if options.Spec.Role != swarm.NodeRoleManager {
+					return client.NodeUpdateResult{}, errors.New("expected role manager, got" + string(options.Spec.Role))
 				}
-				return nil
+				return client.NodeUpdateResult{}, nil
 			},
 		}))
 	cmd.SetArgs([]string{"nodeID"})
@@ -68,14 +72,16 @@ func TestNodePromoteNoChange(t *testing.T) {
 func TestNodePromoteMultipleNode(t *testing.T) {
 	cmd := newPromoteCommand(
 		test.NewFakeCli(&fakeClient{
-			nodeInspectFunc: func() (swarm.Node, []byte, error) {
-				return *Node(), []byte{}, nil
+			nodeInspectFunc: func() (client.NodeInspectResult, error) {
+				return client.NodeInspectResult{
+					Node: *builders.Node(),
+				}, nil
 			},
-			nodeUpdateFunc: func(nodeID string, version swarm.Version, node swarm.NodeSpec) error {
-				if node.Role != swarm.NodeRoleManager {
-					return errors.Errorf("expected role manager, got %s", node.Role)
+			nodeUpdateFunc: func(nodeID string, options client.NodeUpdateOptions) (client.NodeUpdateResult, error) {
+				if options.Spec.Role != swarm.NodeRoleManager {
+					return client.NodeUpdateResult{}, errors.New("expected role manager, got" + string(options.Spec.Role))
 				}
-				return nil
+				return client.NodeUpdateResult{}, nil
 			},
 		}))
 	cmd.SetArgs([]string{"nodeID1", "nodeID2"})

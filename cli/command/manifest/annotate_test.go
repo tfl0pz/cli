@@ -1,9 +1,10 @@
 package manifest
 
 import (
-	"io/ioutil"
+	"io"
 	"testing"
 
+	"github.com/docker/cli/cli/manifest/store"
 	"github.com/docker/cli/internal/test"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
@@ -17,7 +18,7 @@ func TestManifestAnnotateError(t *testing.T) {
 	}{
 		{
 			args:          []string{"too-few-arguments"},
-			expectedError: "requires exactly 2 arguments",
+			expectedError: "requires 2 arguments",
 		},
 		{
 			args:          []string{"th!si'sa/fa!ke/li$t/name", "example.com/alpine:3.0"},
@@ -33,44 +34,47 @@ func TestManifestAnnotateError(t *testing.T) {
 		cli := test.NewFakeCli(nil)
 		cmd := newAnnotateCommand(cli)
 		cmd.SetArgs(tc.args)
-		cmd.SetOut(ioutil.Discard)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
 		assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
 	}
 }
 
 func TestManifestAnnotate(t *testing.T) {
-	store, cleanup := newTempManifestStore(t)
-	defer cleanup()
+	manifestStore := store.NewStore(t.TempDir())
 
 	cli := test.NewFakeCli(nil)
-	cli.SetManifestStore(store)
+	cli.SetManifestStore(manifestStore)
 	namedRef := ref(t, "alpine:3.0")
 	imageManifest := fullImageManifest(t, namedRef)
-	err := store.Save(ref(t, "list:v1"), namedRef, imageManifest)
+	err := manifestStore.Save(ref(t, "list:v1"), namedRef, imageManifest)
 	assert.NilError(t, err)
 
 	cmd := newAnnotateCommand(cli)
 	cmd.SetArgs([]string{"example.com/list:v1", "example.com/fake:0.0"})
-	cmd.SetOut(ioutil.Discard)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
 	expectedError := "manifest for image example.com/fake:0.0 does not exist"
 	assert.ErrorContains(t, cmd.Execute(), expectedError)
 
 	cmd.SetArgs([]string{"example.com/list:v1", "example.com/alpine:3.0"})
-	cmd.Flags().Set("os", "freebsd")
-	cmd.Flags().Set("arch", "fake")
-	cmd.Flags().Set("os-version", "1")
-	cmd.Flags().Set("os-features", "feature1")
-	cmd.Flags().Set("variant", "v7")
-	expectedError = "manifest entry for image has unsupported os/arch combination"
+	assert.NilError(t, cmd.Flags().Set("os", "freebsd"))
+	assert.NilError(t, cmd.Flags().Set("arch", "<invalid>"))
+	assert.NilError(t, cmd.Flags().Set("os-version", "1"))
+	assert.NilError(t, cmd.Flags().Set("os-features", "feature1"))
+	assert.NilError(t, cmd.Flags().Set("variant", "v7"))
+
+	expectedError = "manifest entry for image has invalid platform"
 	assert.ErrorContains(t, cmd.Execute(), expectedError)
 
-	cmd.Flags().Set("arch", "arm")
+	assert.NilError(t, cmd.Flags().Set("arch", "arm"))
 	assert.NilError(t, cmd.Execute())
 
 	cmd = newInspectCommand(cli)
 	err = cmd.Flags().Set("verbose", "true")
 	assert.NilError(t, err)
 	cmd.SetArgs([]string{"example.com/list:v1", "example.com/alpine:3.0"})
+	cmd.SetErr(io.Discard)
 	assert.NilError(t, cmd.Execute())
 	actual := cli.OutBuffer()
 	expected := golden.Get(t, "inspect-annotate.golden")

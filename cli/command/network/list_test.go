@@ -2,15 +2,14 @@ package network
 
 import (
 	"context"
-	"io/ioutil"
+	"errors"
+	"io"
 	"testing"
 
 	"github.com/docker/cli/internal/test"
-	. "github.com/docker/cli/internal/test/builders"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/google/go-cmp/cmp"
-	"github.com/pkg/errors"
+	"github.com/docker/cli/internal/test/builders"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/golden"
@@ -18,12 +17,12 @@ import (
 
 func TestNetworkListErrors(t *testing.T) {
 	testCases := []struct {
-		networkListFunc func(ctx context.Context, options types.NetworkListOptions) ([]types.NetworkResource, error)
+		networkListFunc func(ctx context.Context, options client.NetworkListOptions) (client.NetworkListResult, error)
 		expectedError   string
 	}{
 		{
-			networkListFunc: func(ctx context.Context, options types.NetworkListOptions) ([]types.NetworkResource, error) {
-				return []types.NetworkResource{}, errors.Errorf("error creating network")
+			networkListFunc: func(ctx context.Context, options client.NetworkListOptions) (client.NetworkListResult, error) {
+				return client.NetworkListResult{}, errors.New("error creating network")
 			},
 			expectedError: "error creating network",
 		},
@@ -35,7 +34,8 @@ func TestNetworkListErrors(t *testing.T) {
 				networkListFunc: tc.networkListFunc,
 			}),
 		)
-		cmd.SetOut(ioutil.Discard)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
 		assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
 	}
 }
@@ -43,7 +43,7 @@ func TestNetworkListErrors(t *testing.T) {
 func TestNetworkList(t *testing.T) {
 	testCases := []struct {
 		doc             string
-		networkListFunc func(ctx context.Context, options types.NetworkListOptions) ([]types.NetworkResource, error)
+		networkListFunc func(ctx context.Context, options client.NetworkListOptions) (client.NetworkListResult, error)
 		flags           map[string]string
 		golden          string
 	}{
@@ -53,16 +53,22 @@ func TestNetworkList(t *testing.T) {
 				"filter": "image.name=ubuntu",
 			},
 			golden: "network-list.golden",
-			networkListFunc: func(ctx context.Context, options types.NetworkListOptions) ([]types.NetworkResource, error) {
-				expectedOpts := types.NetworkListOptions{
-					Filters: filters.NewArgs(filters.Arg("image.name", "ubuntu")),
+			networkListFunc: func(ctx context.Context, options client.NetworkListOptions) (client.NetworkListResult, error) {
+				expectedOpts := client.NetworkListOptions{
+					Filters: make(client.Filters).Add("image.name", "ubuntu"),
 				}
-				assert.Check(t, is.DeepEqual(expectedOpts, options, cmp.AllowUnexported(filters.Args{})))
+				assert.Check(t, is.DeepEqual(expectedOpts, options))
 
-				return []types.NetworkResource{*NetworkResource(NetworkResourceID("123454321"),
-					NetworkResourceName("network_1"),
-					NetworkResourceDriver("09.7.01"),
-					NetworkResourceScope("global"))}, nil
+				return client.NetworkListResult{
+					Items: []network.Summary{
+						*builders.NetworkResource(
+							builders.NetworkResourceID("123454321"),
+							builders.NetworkResourceName("network_1"),
+							builders.NetworkResourceDriver("09.7.01"),
+							builders.NetworkResourceScope("global"),
+						),
+					},
+				}, nil
 			},
 		},
 		{
@@ -71,11 +77,14 @@ func TestNetworkList(t *testing.T) {
 				"format": "{{ .Name }}",
 			},
 			golden: "network-list-sort.golden",
-			networkListFunc: func(ctx context.Context, options types.NetworkListOptions) ([]types.NetworkResource, error) {
-				return []types.NetworkResource{
-					*NetworkResource(NetworkResourceName("network-2-foo")),
-					*NetworkResource(NetworkResourceName("network-1-foo")),
-					*NetworkResource(NetworkResourceName("network-10-foo"))}, nil
+			networkListFunc: func(ctx context.Context, options client.NetworkListOptions) (client.NetworkListResult, error) {
+				return client.NetworkListResult{
+					Items: []network.Summary{
+						*builders.NetworkResource(builders.NetworkResourceName("network-2-foo")),
+						*builders.NetworkResource(builders.NetworkResourceName("network-1-foo")),
+						*builders.NetworkResource(builders.NetworkResourceName("network-10-foo")),
+					},
+				}, nil
 			},
 		},
 	}
@@ -85,7 +94,7 @@ func TestNetworkList(t *testing.T) {
 			cli := test.NewFakeCli(&fakeClient{networkListFunc: tc.networkListFunc})
 			cmd := newListCommand(cli)
 			for key, value := range tc.flags {
-				cmd.Flags().Set(key, value)
+				assert.Check(t, cmd.Flags().Set(key, value))
 			}
 			assert.NilError(t, cmd.Execute())
 			golden.Assert(t, cli.OutBuffer().String(), tc.golden)

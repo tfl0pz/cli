@@ -1,34 +1,26 @@
----
-title: "stack ps"
-description: "The stack ps command description and usage"
-keywords: "stack, ps"
----
-
 # stack ps
 
-```markdown
-Usage:  docker stack ps [OPTIONS] STACK
-
+<!---MARKER_GEN_START-->
 List the tasks in the stack
 
-Options:
-  -f, --filter filter         Filter output based on conditions provided
-      --format string         Pretty-print tasks using a Go template
-      --help                  Print usage
-      --kubeconfig string     Kubernetes config file
-      --namespace string      Kubernetes namespace to use
-      --no-resolve            Do not map IDs to Names
-      --no-trunc              Do not truncate output
-      --orchestrator string   Orchestrator to use (swarm|kubernetes|all)
-  -q, --quiet                 Only display task IDs
-```
+### Options
+
+| Name                                   | Type     | Default | Description                                                                                                                                                                                                                                                                                                                                                                                                                          |
+|:---------------------------------------|:---------|:--------|:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [`-f`](#filter), [`--filter`](#filter) | `filter` |         | Filter output based on conditions provided                                                                                                                                                                                                                                                                                                                                                                                           |
+| [`--format`](#format)                  | `string` |         | Format output using a custom template:<br>'table':            Print output in table format with column headers (default)<br>'table TEMPLATE':   Print output in table format using the given Go template<br>'json':             Print in JSON format<br>'TEMPLATE':         Print output using the given Go template.<br>Refer to https://docs.docker.com/go/formatting/ for more information about formatting output with templates |
+| [`--no-resolve`](#no-resolve)          | `bool`   |         | Do not map IDs to Names                                                                                                                                                                                                                                                                                                                                                                                                              |
+| [`--no-trunc`](#no-trunc)              | `bool`   |         | Do not truncate output                                                                                                                                                                                                                                                                                                                                                                                                               |
+| [`-q`](#quiet), [`--quiet`](#quiet)    | `bool`   |         | Only display task IDs                                                                                                                                                                                                                                                                                                                                                                                                                |
+
+
+<!---MARKER_GEN_END-->
 
 ## Description
 
 Lists the tasks that are running as part of the specified stack.
 
-> **Note**
->
+> [!NOTE]
 > This is a cluster management command, and must be executed on a swarm
 > manager node. To learn about managers and workers, refer to the
 > [Swarm mode section](https://docs.docker.com/engine/swarm/) in the
@@ -54,7 +46,7 @@ kqgdmededccb        voting_vote.2         dockersamples/examplevotingapp_vote:be
 t72q3z038jeh        voting_redis.2        redis:alpine                                   node3  Running        Running 3 minutes ago
 ```
 
-### Filtering
+### <a name="filter"></a> Filtering (--filter)
 
 The filtering flag (`-f` or `--filter`) format is a `key=value` pair. If there
 is more than one filter, then pass multiple flags (e.g. `--filter "foo=bar" --filter "bif=baz"`).
@@ -123,22 +115,22 @@ kqgdmededccb        voting_vote.2         dockersamples/examplevotingapp_vote:be
 t72q3z038jeh        voting_redis.2        redis:alpine                                   node3  Running        Running 21 minutes ago
 ```
 
-### Formatting
+### <a name="format"></a> Format the output (--format)
 
 The formatting options (`--format`) pretty-prints tasks output using a Go template.
 
 Valid placeholders for the Go template are listed below:
 
-Placeholder     | Description
-----------------|------------------------------------------------------------------------------------------
-`.ID`           | Task ID
-`.Name`         | Task name
-`.Image`        | Task image
-`.Node`         | Node ID
-`.DesiredState` | Desired state of the task (`running`, `shutdown`, or `accepted`)
-`.CurrentState` | Current state of the task
-`.Error`        | Error
-`.Ports`        | Task published ports
+| Placeholder     | Description                                                      |
+|-----------------|------------------------------------------------------------------|
+| `.ID`           | Task ID                                                          |
+| `.Name`         | Task name                                                        |
+| `.Image`        | Task image                                                       |
+| `.Node`         | Node ID                                                          |
+| `.DesiredState` | Desired state of the task (`running`, `shutdown`, or `accepted`) |
+| `.CurrentState` | Current state of the task                                        |
+| `.Error`        | Error                                                            |
+| `.Ports`        | Task published ports                                             |
 
 When using the `--format` option, the `stack ps` command will either
 output the data exactly as the template declares or, when using the
@@ -160,7 +152,15 @@ voting_vote.2: dockersamples/examplevotingapp_vote:before
 voting_redis.2: redis:alpine
 ```
 
-### Do not map IDs to Names
+To list all tasks in JSON format, use the `json` directive:
+```console
+$ docker stack ps --format json myapp
+{"CurrentState":"Preparing 23 seconds ago","DesiredState":"Running","Error":"","ID":"2ufjubh79tn0","Image":"localstack/localstack:latest","Name":"myapp_localstack.1","Node":"docker-desktop","Ports":""}
+{"CurrentState":"Running 20 seconds ago","DesiredState":"Running","Error":"","ID":"roee387ngf5r","Image":"redis:6.0.9-alpine3.12","Name":"myapp_redis.1","Node":"docker-desktop","Ports":""}
+{"CurrentState":"Preparing 13 seconds ago","DesiredState":"Running","Error":"","ID":"yte68ouq7glh","Image":"postgres:13.2-alpine","Name":"myapp_repos-db.1","Node":"docker-desktop","Ports":""}
+```
+
+### <a name="no-resolve"></a> Do not map IDs to Names (--no-resolve)
 
 The `--no-resolve` option shows IDs for task name, without mapping IDs to Names.
 
@@ -178,7 +178,7 @@ kqgdmededccb        qyprtqw1g5nrki557i974ou1d.2   dockersamples/examplevotingapp
 t72q3z038jeh        tg61x8myx563ueo3urmn1ic6m.2   redis:alpine                                   kanqcxfajd1r16wlnqcblobmm   Running        Running 31 minutes ago
 ```
 
-### Do not truncate output
+### <a name="no-trunc"></a> Do not truncate output (--no-trunc)
 
 When deploying a service, docker resolves the digest for the service's
 image, and pins the service to that digest. The digest is not shown by
@@ -189,20 +189,20 @@ also shows the non-truncated task IDs, and error-messages, as can be seen below:
 $ docker stack ps --no-trunc voting
 
 ID                          NAME                  IMAGE                                                                                                                 NODE   DESIRED STATE  CURREN STATE           ERROR  PORTS
-xim5bcqtgk1bxqz91jzo4a1s5   voting_worker.1       dockersamples/examplevotingapp_worker:latest@sha256:3e4ddf59c15f432280a2c0679c4fc5a2ee5a797023c8ef0d3baf7b1385e9fed   node2  Running        Runnin 32 minutes ago
-q7yik0ks1in6kv32gg6y6yjf7   voting_result.1       dockersamples/examplevotingapp_result:before@sha256:83b56996e930c292a6ae5187fda84dd6568a19d97cdb933720be15c757b7463   node1  Running        Runnin 32 minutes ago
-rx5yo0866nfxc58zf4irsss6n   voting_vote.1         dockersamples/examplevotingapp_vote:before@sha256:8e64b182c87de902f2b72321c89b4af4e2b942d76d0b772532ff27ec4c6ebf6     node3  Running        Runnin 32 minutes ago
-tz6j82jnwrx7n2offljp3mn03   voting_db.1           postgres:9.4@sha256:6046af499eae34d2074c0b53f9a8b404716d415e4a03e68bc1d2f8064f2b027                                   node1  Running        Runnin 32 minutes ago
-w48spazhbmxcmbjfi54gs7x90   voting_redis.1        redis:alpine@sha256:9cd405cd1ec1410eaab064a1383d0d8854d1ef74a54e1e4a92fb4ec7bdc3ee7                                   node2  Running        Runnin 32 minutes ago
-6jj1m02freg1n3z9n1evrzsbl   voting_visualizer.1   dockersamples/visualizer:stable@sha256:f924ad66c8e94b10baaf7bdb9cd491ef4e982a1d048a56a17e02bf5945401e5                node1  Running        Runnin 32 minutes ago
-kqgdmededccbhz2wuc0e9hx7g   voting_vote.2         dockersamples/examplevotingapp_vote:before@sha256:8e64b182c87de902f2b72321c89b4af4e2b942d76d0b772532ff27ec4c6ebf6     node2  Running        Runnin 32 minutes ago
-t72q3z038jehe1wbh9gdum076   voting_redis.2        redis:alpine@sha256:9cd405cd1ec1410eaab064a1383d0d8854d1ef74a54e1e4a92fb4ec7bdc3ee7                                   node3  Running        Runnin 32 minutes ago
+xim5bcqtgk1bxqz91jzo4a1s5   voting_worker.1       dockersamples/examplevotingapp_worker:latest@sha256:3e4ddf59c15f432280a2c0679c4fc5a2ee5a797023c8ef0d3baf7b1385e9fed   node2  Running        Running 32 minutes ago
+q7yik0ks1in6kv32gg6y6yjf7   voting_result.1       dockersamples/examplevotingapp_result:before@sha256:83b56996e930c292a6ae5187fda84dd6568a19d97cdb933720be15c757b7463   node1  Running        Running 32 minutes ago
+rx5yo0866nfxc58zf4irsss6n   voting_vote.1         dockersamples/examplevotingapp_vote:before@sha256:8e64b182c87de902f2b72321c89b4af4e2b942d76d0b772532ff27ec4c6ebf6     node3  Running        Running 32 minutes ago
+tz6j82jnwrx7n2offljp3mn03   voting_db.1           postgres:9.4@sha256:6046af499eae34d2074c0b53f9a8b404716d415e4a03e68bc1d2f8064f2b027                                   node1  Running        Running 32 minutes ago
+w48spazhbmxcmbjfi54gs7x90   voting_redis.1        redis:alpine@sha256:9cd405cd1ec1410eaab064a1383d0d8854d1ef74a54e1e4a92fb4ec7bdc3ee7                                   node2  Running        Running 32 minutes ago
+6jj1m02freg1n3z9n1evrzsbl   voting_visualizer.1   dockersamples/visualizer:stable@sha256:f924ad66c8e94b10baaf7bdb9cd491ef4e982a1d048a56a17e02bf5945401e5                node1  Running        Running 32 minutes ago
+kqgdmededccbhz2wuc0e9hx7g   voting_vote.2         dockersamples/examplevotingapp_vote:before@sha256:8e64b182c87de902f2b72321c89b4af4e2b942d76d0b772532ff27ec4c6ebf6     node2  Running        Running 32 minutes ago
+t72q3z038jehe1wbh9gdum076   voting_redis.2        redis:alpine@sha256:9cd405cd1ec1410eaab064a1383d0d8854d1ef74a54e1e4a92fb4ec7bdc3ee7                                   node3  Running        Running 32 minutes ago
 ```
 
-### Only display task IDs
+### <a name="quiet"></a> Only display task IDs (-q, --quiet)
 
 The `-q ` or `--quiet` option only shows IDs of the tasks in the stack.
-This example outputs all task IDs of the "voting" stack;
+This example outputs all task IDs of the `voting` stack:
 
 ```console
 $ docker stack ps -q voting
@@ -218,7 +218,7 @@ t72q3z038jeh
 
 This option can be used to perform batch operations. For example, you can use
 the task IDs as input for other commands, such as `docker inspect`. The
-following example inspects all tasks of the "voting" stack;
+following example inspects all tasks of the `voting` stack:
 
 ```console
 $ docker inspect $(docker stack ps -q voting)

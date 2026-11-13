@@ -1,28 +1,38 @@
-version: '2.1'
-
 services:
+
   registry:
-    image: 'registry:2'
+    image: 'registry:3'
+
+  privateregistry:
+    build:
+      context: ./testdata/registry
+    environment:
+      - REGISTRY_HTTP_ADDR=0.0.0.0:5001
+      - REGISTRY_HTTP_DEBUG_ADDR=0.0.0.0:5002
+      - REGISTRY_AUTH=htpasswd
+      - REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm
+      - REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd
+
+  tlsregistry:
+    build:
+      context: ./testdata/registry
+    environment:
+      - REGISTRY_HTTP_ADDR=0.0.0.0:5003
+      - REGISTRY_HTTP_DEBUG_ADDR=0.0.0.0:5004
+      - REGISTRY_AUTH=htpasswd
+      - REGISTRY_AUTH_HTPASSWD_REALM=Registry Realm
+      - REGISTRY_AUTH_HTPASSWD_PATH=/auth/htpasswd
+      - REGISTRY_HTTP_TLS_CERTIFICATE=/certs/tlsregistry.crt
+      - REGISTRY_HTTP_TLS_KEY=/certs/tlsregistry.key
 
   engine:
-      image: 'docker:${TEST_ENGINE_VERSION:-stable-dind}'
+      build:
+        context: ./testdata
+        dockerfile: engine/Dockerfile
+        args:
+          ENGINE_VERSION: ${ENGINE_VERSION:-29}
+          ENGINE_SOURCE: ${ENGINE_SOURCE:-dind}
       privileged: true
-      command: ['--insecure-registry=registry:5000']
+      command: ['--insecure-registry=registry:5000', '--insecure-registry=privateregistry:5001', '--experimental']
       environment:
         - DOCKER_TLS_CERTDIR=
-
-  notary-server:
-      build:
-        context: ./testdata
-        dockerfile: Dockerfile.notary-server
-      ports:
-        - 4443:4443
-      command: ['notary-server', '-config=/fixtures/notary-config.json']
-  evil-notary-server:
-      build:
-        context: ./testdata
-        dockerfile: Dockerfile.evil-notary-server
-      ports:
-        - 4444:4443
-      command: ['notary-server', '-config=/fixtures/notary-config.json']
-

@@ -1,14 +1,16 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package formatter
 
 import (
-	"fmt"
-	"sort"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/go-units"
+	"github.com/moby/moby/api/types/build"
 )
 
 const (
@@ -52,26 +54,26 @@ shared: {{.Shared}}
 	return Format(source)
 }
 
-func buildCacheSort(buildCache []*types.BuildCache) {
-	sort.Slice(buildCache, func(i, j int) bool {
-		lui, luj := buildCache[i].LastUsedAt, buildCache[j].LastUsedAt
+func buildCacheSort(buildCache []build.CacheRecord) {
+	slices.SortFunc(buildCache, func(a, b build.CacheRecord) int {
 		switch {
-		case lui == nil && luj == nil:
-			return strings.Compare(buildCache[i].ID, buildCache[j].ID) < 0
-		case lui == nil:
-			return true
-		case luj == nil:
-			return false
-		case lui.Equal(*luj):
-			return strings.Compare(buildCache[i].ID, buildCache[j].ID) < 0
-		default:
-			return lui.Before(*luj)
+		case a.LastUsedAt == nil && b.LastUsedAt == nil:
+			return strings.Compare(a.ID, b.ID)
+		case a.LastUsedAt == nil:
+			return -1
+		case b.LastUsedAt == nil:
+			return 1
 		}
+
+		if c := a.LastUsedAt.Compare(*b.LastUsedAt); c != 0 {
+			return c
+		}
+		return strings.Compare(a.ID, b.ID)
 	})
 }
 
 // BuildCacheWrite renders the context for a list of containers
-func BuildCacheWrite(ctx Context, buildCaches []*types.BuildCache) error {
+func BuildCacheWrite(ctx Context, buildCaches []build.CacheRecord) error {
 	render := func(format func(subContext SubContext) error) error {
 		buildCacheSort(buildCaches)
 		for _, bc := range buildCaches {
@@ -88,7 +90,7 @@ func BuildCacheWrite(ctx Context, buildCaches []*types.BuildCache) error {
 type buildCacheContext struct {
 	HeaderContext
 	trunc bool
-	v     *types.BuildCache
+	v     build.CacheRecord
 }
 
 func newBuildCacheContext() *buildCacheContext {
@@ -115,7 +117,7 @@ func (c *buildCacheContext) MarshalJSON() ([]byte, error) {
 func (c *buildCacheContext) ID() string {
 	id := c.v.ID
 	if c.trunc {
-		id = stringid.TruncateID(c.v.ID)
+		id = TruncateID(c.v.ID)
 	}
 	if c.v.InUse {
 		return id + "*"
@@ -124,10 +126,14 @@ func (c *buildCacheContext) ID() string {
 }
 
 func (c *buildCacheContext) Parent() string {
-	if c.trunc {
-		return stringid.TruncateID(c.v.Parent)
+	var parent string
+	if len(c.v.Parents) > 0 {
+		parent = strings.Join(c.v.Parents, ", ")
 	}
-	return c.v.Parent
+	if c.trunc {
+		return TruncateID(parent)
+	}
+	return parent
 }
 
 func (c *buildCacheContext) CacheType() string {
@@ -165,13 +171,13 @@ func (c *buildCacheContext) LastUsedSince() string {
 }
 
 func (c *buildCacheContext) UsageCount() string {
-	return fmt.Sprintf("%d", c.v.UsageCount)
+	return strconv.Itoa(c.v.UsageCount)
 }
 
 func (c *buildCacheContext) InUse() string {
-	return fmt.Sprintf("%t", c.v.InUse)
+	return strconv.FormatBool(c.v.InUse)
 }
 
 func (c *buildCacheContext) Shared() string {
-	return fmt.Sprintf("%t", c.v.Shared)
+	return strconv.FormatBool(c.v.Shared)
 }

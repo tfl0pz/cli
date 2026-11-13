@@ -1,13 +1,14 @@
 package convert
 
 import (
-	"io/ioutil"
+	"net/netip"
+	"os"
 	"strings"
 
 	composetypes "github.com/docker/cli/cli/compose/types"
-	"github.com/docker/docker/api/types"
-	networktypes "github.com/docker/docker/api/types/network"
-	"github.com/docker/docker/api/types/swarm"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 )
 
 const (
@@ -42,6 +43,11 @@ func NewNamespace(name string) Namespace {
 
 // AddStackLabel returns labels with the namespace label added
 func AddStackLabel(namespace Namespace, labels map[string]string) map[string]string {
+	return addStackLabel(namespace, labels)
+}
+
+// addStackLabel returns labels with the namespace label added
+func addStackLabel(namespace Namespace, labels map[string]string) map[string]string {
 	if labels == nil {
 		labels = make(map[string]string)
 	}
@@ -52,45 +58,43 @@ func AddStackLabel(namespace Namespace, labels map[string]string) map[string]str
 type networkMap map[string]composetypes.NetworkConfig
 
 // Networks from the compose-file type to the engine API type
-func Networks(namespace Namespace, networks networkMap, servicesNetworks map[string]struct{}) (map[string]types.NetworkCreate, []string) {
+func Networks(namespace Namespace, networks networkMap, servicesNetworks map[string]struct{}) (map[string]client.NetworkCreateOptions, []string) {
 	if networks == nil {
 		networks = make(map[string]composetypes.NetworkConfig)
 	}
 
 	externalNetworks := []string{}
-	result := make(map[string]types.NetworkCreate)
+	result := make(map[string]client.NetworkCreateOptions)
 	for internalName := range servicesNetworks {
-		network := networks[internalName]
-		if network.External.External {
-			externalNetworks = append(externalNetworks, network.Name)
+		nw := networks[internalName]
+		if nw.External.External {
+			externalNetworks = append(externalNetworks, nw.Name)
 			continue
 		}
 
-		createOpts := types.NetworkCreate{
-			Labels:     AddStackLabel(namespace, network.Labels),
-			Driver:     network.Driver,
-			Options:    network.DriverOpts,
-			Internal:   network.Internal,
-			Attachable: network.Attachable,
+		createOpts := client.NetworkCreateOptions{
+			Labels:     addStackLabel(namespace, nw.Labels),
+			Driver:     nw.Driver,
+			Options:    nw.DriverOpts,
+			Internal:   nw.Internal,
+			Attachable: nw.Attachable,
 		}
 
-		if network.Ipam.Driver != "" || len(network.Ipam.Config) > 0 {
-			createOpts.IPAM = &networktypes.IPAM{}
-		}
-
-		if network.Ipam.Driver != "" {
-			createOpts.IPAM.Driver = network.Ipam.Driver
-		}
-		for _, ipamConfig := range network.Ipam.Config {
-			config := networktypes.IPAMConfig{
-				Subnet: ipamConfig.Subnet,
+		if nw.Ipam.Driver != "" || len(nw.Ipam.Config) > 0 {
+			createOpts.IPAM = &network.IPAM{
+				Driver: nw.Ipam.Driver,
 			}
-			createOpts.IPAM.Config = append(createOpts.IPAM.Config, config)
+			for _, ipamConfig := range nw.Ipam.Config {
+				sn, _ := netip.ParsePrefix(ipamConfig.Subnet)
+				createOpts.IPAM.Config = append(createOpts.IPAM.Config, network.IPAMConfig{
+					Subnet: sn,
+				})
+			}
 		}
 
-		networkName := namespace.Scope(internalName)
-		if network.Name != "" {
-			networkName = network.Name
+		networkName := nw.Name
+		if nw.Name == "" {
+			networkName = namespace.Scope(internalName)
 		}
 		result[networkName] = createOpts
 	}
@@ -171,14 +175,14 @@ func driverObjectConfig(namespace Namespace, name string, obj composetypes.FileO
 	return swarmFileObject{
 		Annotations: swarm.Annotations{
 			Name:   name,
-			Labels: AddStackLabel(namespace, obj.Labels),
+			Labels: addStackLabel(namespace, obj.Labels),
 		},
 		Data: []byte{},
 	}
 }
 
 func fileObjectConfig(namespace Namespace, name string, obj composetypes.FileObjectConfig) (swarmFileObject, error) {
-	data, err := ioutil.ReadFile(obj.File)
+	data, err := os.ReadFile(obj.File)
 	if err != nil {
 		return swarmFileObject{}, err
 	}
@@ -192,7 +196,7 @@ func fileObjectConfig(namespace Namespace, name string, obj composetypes.FileObj
 	return swarmFileObject{
 		Annotations: swarm.Annotations{
 			Name:   name,
-			Labels: AddStackLabel(namespace, obj.Labels),
+			Labels: addStackLabel(namespace, obj.Labels),
 		},
 		Data: data,
 	}, nil

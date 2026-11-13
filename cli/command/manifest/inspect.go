@@ -6,13 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/distribution/reference"
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/manifest/types"
 	"github.com/docker/distribution/manifest/manifestlist"
-	"github.com/docker/distribution/reference"
-	"github.com/docker/docker/registry"
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
 
@@ -24,7 +22,7 @@ type inspectOptions struct {
 }
 
 // NewInspectCommand creates a new `docker manifest inspect` command
-func newInspectCommand(dockerCli command.Cli) *cobra.Command {
+func newInspectCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts inspectOptions
 
 	cmd := &cobra.Command{
@@ -39,8 +37,9 @@ func newInspectCommand(dockerCli command.Cli) *cobra.Command {
 				opts.list = args[0]
 				opts.ref = args[1]
 			}
-			return runInspect(dockerCli, opts)
+			return runInspect(cmd.Context(), dockerCLI, opts)
 		},
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -49,7 +48,7 @@ func newInspectCommand(dockerCli command.Cli) *cobra.Command {
 	return cmd
 }
 
-func runInspect(dockerCli command.Cli, opts inspectOptions) error {
+func runInspect(ctx context.Context, dockerCli command.Cli, opts inspectOptions) error {
 	namedRef, err := normalizeReference(opts.ref)
 	if err != nil {
 		return err
@@ -62,7 +61,7 @@ func runInspect(dockerCli command.Cli, opts inspectOptions) error {
 			return err
 		}
 
-		imageManifest, err := dockerCli.ManifestStore().Get(listRef, namedRef)
+		imageManifest, err := newManifestStore(dockerCli).Get(listRef, namedRef)
 		if err != nil {
 			return err
 		}
@@ -70,14 +69,13 @@ func runInspect(dockerCli command.Cli, opts inspectOptions) error {
 	}
 
 	// Try a local manifest list first
-	localManifestList, err := dockerCli.ManifestStore().GetList(namedRef)
+	localManifestList, err := newManifestStore(dockerCli).GetList(namedRef)
 	if err == nil {
 		return printManifestList(dockerCli, namedRef, localManifestList, opts)
 	}
 
 	// Next try a remote manifest
-	ctx := context.Background()
-	registryClient := dockerCli.RegistryClient(opts.insecure)
+	registryClient := newRegistryClient(dockerCli, opts.insecure)
 	imageManifest, err := registryClient.GetManifest(ctx, namedRef)
 	if err == nil {
 		return printManifest(dockerCli, imageManifest, opts)
@@ -101,30 +99,27 @@ func printManifest(dockerCli command.Cli, manifest types.ImageManifest, opts ins
 		if err := json.Indent(buffer, raw, "", "\t"); err != nil {
 			return err
 		}
-		fmt.Fprintln(dockerCli.Out(), buffer.String())
+		_, _ = fmt.Fprintln(dockerCli.Out(), buffer.String())
 		return nil
 	}
 	jsonBytes, err := json.MarshalIndent(manifest, "", "\t")
 	if err != nil {
 		return err
 	}
-	dockerCli.Out().Write(append(jsonBytes, '\n'))
+	_, _ = dockerCli.Out().Write(append(jsonBytes, '\n'))
 	return nil
 }
 
 func printManifestList(dockerCli command.Cli, namedRef reference.Named, list []types.ImageManifest, opts inspectOptions) error {
 	if !opts.verbose {
-		targetRepo, err := registry.ParseRepositoryInfo(namedRef)
-		if err != nil {
-			return err
-		}
+		targetRepo := reference.TrimNamed(namedRef)
 
-		manifests := []manifestlist.ManifestDescriptor{}
+		manifests := make([]manifestlist.ManifestDescriptor, 0, len(list))
 		// More than one response. This is a manifest list.
 		for _, img := range list {
 			mfd, err := buildManifestDescriptor(targetRepo, img)
 			if err != nil {
-				return errors.Wrap(err, "failed to assemble ManifestDescriptor")
+				return fmt.Errorf("failed to assemble ManifestDescriptor: %w", err)
 			}
 			manifests = append(manifests, mfd)
 		}
@@ -136,13 +131,13 @@ func printManifestList(dockerCli command.Cli, namedRef reference.Named, list []t
 		if err != nil {
 			return err
 		}
-		fmt.Fprintln(dockerCli.Out(), string(jsonBytes))
+		_, _ = fmt.Fprintln(dockerCli.Out(), string(jsonBytes))
 		return nil
 	}
 	jsonBytes, err := json.MarshalIndent(list, "", "\t")
 	if err != nil {
 		return err
 	}
-	dockerCli.Out().Write(append(jsonBytes, '\n'))
+	_, _ = dockerCli.Out().Write(append(jsonBytes, '\n'))
 	return nil
 }

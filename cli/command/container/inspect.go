@@ -1,3 +1,6 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package container
 
 import (
@@ -5,7 +8,10 @@ import (
 
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
+	"github.com/docker/cli/cli/command/completion"
 	"github.com/docker/cli/cli/command/inspect"
+	flagsHelper "github.com/docker/cli/cli/flags"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -16,7 +22,7 @@ type inspectOptions struct {
 }
 
 // newInspectCommand creates a new cobra.Command for `docker container inspect`
-func newInspectCommand(dockerCli command.Cli) *cobra.Command {
+func newInspectCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts inspectOptions
 
 	cmd := &cobra.Command{
@@ -25,23 +31,26 @@ func newInspectCommand(dockerCli command.Cli) *cobra.Command {
 		Args:  cli.RequiresMinArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.refs = args
-			return runInspect(dockerCli, opts)
+			return runInspect(cmd.Context(), dockerCLI, opts)
 		},
+		ValidArgsFunction:     completion.ContainerNames(dockerCLI, true),
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
-	flags.StringVarP(&opts.format, "format", "f", "", "Format the output using the given Go template")
+	flags.StringVarP(&opts.format, "format", "f", "", flagsHelper.InspectFormatHelp)
 	flags.BoolVarP(&opts.size, "size", "s", false, "Display total file sizes")
 
 	return cmd
 }
 
-func runInspect(dockerCli command.Cli, opts inspectOptions) error {
-	client := dockerCli.Client()
-	ctx := context.Background()
-
-	getRefFunc := func(ref string) (interface{}, []byte, error) {
-		return client.ContainerInspectWithRaw(ctx, ref, opts.size)
-	}
-	return inspect.Inspect(dockerCli.Out(), opts.refs, opts.format, getRefFunc)
+func runInspect(ctx context.Context, dockerCLI command.Cli, opts inspectOptions) error {
+	apiClient := dockerCLI.Client()
+	return inspect.Inspect(dockerCLI.Out(), opts.refs, opts.format, func(ref string) (any, []byte, error) {
+		res, err := apiClient.ContainerInspect(ctx, ref, client.ContainerInspectOptions{Size: opts.size})
+		if err != nil {
+			return nil, nil, err
+		}
+		return &res.Container, res.Raw, nil
+	})
 }

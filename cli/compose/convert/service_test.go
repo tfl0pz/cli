@@ -2,65 +2,86 @@ package convert
 
 import (
 	"context"
+	"errors"
+	"net/netip"
 	"os"
-	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	composetypes "github.com/docker/cli/cli/compose/types"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/client"
-	"github.com/pkg/errors"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
 
-func TestConvertRestartPolicyFromNone(t *testing.T) {
-	policy, err := convertRestartPolicy("no", nil)
-	assert.NilError(t, err)
-	assert.Check(t, is.DeepEqual((*swarm.RestartPolicy)(nil), policy))
-}
-
-func TestConvertRestartPolicyFromUnknown(t *testing.T) {
-	_, err := convertRestartPolicy("unknown", nil)
-	assert.Error(t, err, "unknown restart policy: unknown")
-}
-
-func TestConvertRestartPolicyFromAlways(t *testing.T) {
-	policy, err := convertRestartPolicy("always", nil)
-	expected := &swarm.RestartPolicy{
-		Condition: swarm.RestartPolicyConditionAny,
-	}
-	assert.NilError(t, err)
-	assert.Check(t, is.DeepEqual(expected, policy))
-}
-
-func TestConvertRestartPolicyFromFailure(t *testing.T) {
-	policy, err := convertRestartPolicy("on-failure:4", nil)
+func TestConvertRestartPolicy(t *testing.T) {
 	attempts := uint64(4)
-	expected := &swarm.RestartPolicy{
-		Condition:   swarm.RestartPolicyConditionOnFailure,
-		MaxAttempts: &attempts,
+	tests := []struct {
+		input    string
+		expected *swarm.RestartPolicy
+		expError string
+	}{
+		{},
+		{
+			input: "no",
+		},
+		{
+			input:    "unknown",
+			expError: "invalid restart policy: unknown policy 'unknown'",
+		},
+		{
+			input: "always",
+			expected: &swarm.RestartPolicy{
+				Condition: swarm.RestartPolicyConditionAny,
+			},
+		},
+		{
+			input: "on-failure:4",
+			expected: &swarm.RestartPolicy{
+				Condition:   swarm.RestartPolicyConditionOnFailure,
+				MaxAttempts: &attempts,
+			},
+		},
 	}
-	assert.NilError(t, err)
-	assert.Check(t, is.DeepEqual(expected, policy))
-}
 
-func strPtr(val string) *string {
-	return &val
+	for _, tc := range tests {
+		name := tc.input
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
+			policy, err := convertRestartPolicy(tc.input, nil)
+			if tc.expError != "" {
+				assert.Check(t, is.ErrorContains(err, tc.expError))
+				assert.Check(t, is.Nil(policy))
+				return
+			}
+			assert.NilError(t, err)
+			assert.Check(t, is.DeepEqual(policy, tc.expected))
+		})
+	}
 }
 
 func TestConvertEnvironment(t *testing.T) {
 	source := map[string]*string{
-		"foo": strPtr("bar"),
-		"key": strPtr("value"),
+		"foo": new("bar"),
+		"key": new("value"),
 	}
 	env := convertEnvironment(source)
-	sort.Strings(env)
 	assert.Check(t, is.DeepEqual([]string{"foo=bar", "key=value"}, env))
+}
+
+func TestConvertEnvironmentWhenNilValueExists(t *testing.T) {
+	source := map[string]*string{
+		"key":            new("value"),
+		"keyWithNoValue": nil,
+	}
+	env := convertEnvironment(source)
+	assert.Check(t, is.DeepEqual([]string{"key=value", "keyWithNoValue"}, env))
 }
 
 func TestConvertExtraHosts(t *testing.T) {
@@ -126,17 +147,24 @@ func TestConvertHealthcheck(t *testing.T) {
 	retries := uint64(10)
 	timeout := composetypes.Duration(30 * time.Second)
 	interval := composetypes.Duration(2 * time.Millisecond)
+	startPeriod := composetypes.Duration(time.Minute)
+	startInterval := composetypes.Duration(1 * time.Second)
+
 	source := &composetypes.HealthCheckConfig{
-		Test:     []string{"EXEC", "touch", "/foo"},
-		Timeout:  &timeout,
-		Interval: &interval,
-		Retries:  &retries,
+		Test:          []string{"EXEC", "touch", "/foo"},
+		Timeout:       &timeout,
+		Interval:      &interval,
+		Retries:       &retries,
+		StartPeriod:   &startPeriod,
+		StartInterval: &startInterval,
 	}
 	expected := &container.HealthConfig{
-		Test:     source.Test,
-		Timeout:  time.Duration(timeout),
-		Interval: time.Duration(interval),
-		Retries:  10,
+		Test:          source.Test,
+		Timeout:       time.Duration(timeout),
+		Interval:      time.Duration(interval),
+		StartPeriod:   time.Duration(startPeriod),
+		StartInterval: time.Duration(startInterval),
+		Retries:       10,
 	}
 
 	healthcheck, err := convertHealthcheck(source)
@@ -226,6 +254,10 @@ func TestConvertServiceNetworks(t *testing.T) {
 	networks := map[string]*composetypes.ServiceNetworkConfig{
 		"front": {
 			Aliases: []string{"something"},
+			DriverOpts: map[string]string{
+				"driver.opt1": "optval1",
+				"driver.opt2": "optval2",
+			},
 		},
 		"back": {
 			Aliases: []string{"other"},
@@ -243,6 +275,10 @@ func TestConvertServiceNetworks(t *testing.T) {
 		{
 			Target:  "fronttier",
 			Aliases: []string{"something", "service"},
+			DriverOpts: map[string]string{
+				"driver.opt1": "optval1",
+				"driver.opt2": "optval2",
+			},
 		},
 	}
 
@@ -286,17 +322,17 @@ var (
 func TestConvertDNSConfigAll(t *testing.T) {
 	dnsConfig := convertDNSConfig(nameservers, search)
 	assert.Check(t, is.DeepEqual(&swarm.DNSConfig{
-		Nameservers: nameservers,
+		Nameservers: toNetipAddrSlice(nameservers),
 		Search:      search,
-	}, dnsConfig))
+	}, dnsConfig, cmpopts.EquateComparable(netip.Addr{})))
 }
 
 func TestConvertDNSConfigNameservers(t *testing.T) {
 	dnsConfig := convertDNSConfig(nameservers, nil)
 	assert.Check(t, is.DeepEqual(&swarm.DNSConfig{
-		Nameservers: nameservers,
+		Nameservers: toNetipAddrSlice(nameservers),
 		Search:      nil,
-	}, dnsConfig))
+	}, dnsConfig, cmpopts.EquateComparable(netip.Addr{})))
 }
 
 func TestConvertDNSConfigSearch(t *testing.T) {
@@ -304,7 +340,7 @@ func TestConvertDNSConfigSearch(t *testing.T) {
 	assert.Check(t, is.DeepEqual(&swarm.DNSConfig{
 		Nameservers: nil,
 		Search:      search,
-	}, dnsConfig))
+	}, dnsConfig, cmpopts.EquateComparable(netip.Addr{})))
 }
 
 func TestConvertCredentialSpec(t *testing.T) {
@@ -387,7 +423,6 @@ func TestConvertCredentialSpec(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			namespace := NewNamespace(tc.name)
 			swarmSpec, err := convertCredentialSpec(namespace, tc.in, tc.configs)
@@ -405,19 +440,19 @@ func TestConvertCredentialSpec(t *testing.T) {
 func TestConvertUpdateConfigOrder(t *testing.T) {
 	// test default behavior
 	updateConfig := convertUpdateConfig(&composetypes.UpdateConfig{})
-	assert.Check(t, is.Equal("", updateConfig.Order))
+	assert.Check(t, is.Equal("", string(updateConfig.Order)))
 
 	// test start-first
 	updateConfig = convertUpdateConfig(&composetypes.UpdateConfig{
 		Order: "start-first",
 	})
-	assert.Check(t, is.Equal(updateConfig.Order, "start-first"))
+	assert.Check(t, is.Equal(string(updateConfig.Order), "start-first"))
 
 	// test stop-first
 	updateConfig = convertUpdateConfig(&composetypes.UpdateConfig{
 		Order: "stop-first",
 	})
-	assert.Check(t, is.Equal(updateConfig.Order, "stop-first"))
+	assert.Check(t, is.Equal(string(updateConfig.Order), "stop-first"))
 }
 
 func TestConvertFileObject(t *testing.T) {
@@ -427,7 +462,7 @@ func TestConvertFileObject(t *testing.T) {
 		Target: "target",
 		UID:    "user",
 		GID:    "group",
-		Mode:   uint32Ptr(0644),
+		Mode:   new(uint32(0o644)),
 	}
 	swarmRef, err := convertFileObject(namespace, config, lookupConfig)
 	assert.NilError(t, err)
@@ -438,7 +473,7 @@ func TestConvertFileObject(t *testing.T) {
 			Name: config.Target,
 			UID:  config.UID,
 			GID:  config.GID,
-			Mode: os.FileMode(0644),
+			Mode: os.FileMode(0o644),
 		},
 	}
 	assert.Check(t, is.DeepEqual(expected, swarmRef))
@@ -463,7 +498,7 @@ func TestConvertFileObjectDefaults(t *testing.T) {
 			Name: config.Source,
 			UID:  "0",
 			GID:  "0",
-			Mode: os.FileMode(0444),
+			Mode: os.FileMode(0o444),
 		},
 	}
 	assert.Check(t, is.DeepEqual(expected, swarmRef))
@@ -473,7 +508,7 @@ func TestServiceConvertsIsolation(t *testing.T) {
 	src := composetypes.ServiceConfig{
 		Isolation: "hyperv",
 	}
-	result, err := Service("1.35", Namespace{name: "foo"}, src, nil, nil, nil, nil)
+	result, err := Service(Namespace{name: "foo"}, src, nil, nil, nil, nil)
 	assert.NilError(t, err)
 	assert.Check(t, is.Equal(container.IsolationHyperV, result.TaskTemplate.ContainerSpec.Isolation))
 }
@@ -492,17 +527,20 @@ func TestConvertServiceSecrets(t *testing.T) {
 			Name: "bar_secret",
 		},
 	}
-	client := &fakeClient{
-		secretListFunc: func(opts types.SecretListOptions) ([]swarm.Secret, error) {
-			assert.Check(t, is.Contains(opts.Filters.Get("name"), "foo_secret"))
-			assert.Check(t, is.Contains(opts.Filters.Get("name"), "bar_secret"))
-			return []swarm.Secret{
-				{Spec: swarm.SecretSpec{Annotations: swarm.Annotations{Name: "foo_secret"}}},
-				{Spec: swarm.SecretSpec{Annotations: swarm.Annotations{Name: "bar_secret"}}},
+	apiClient := &fakeClient{
+		secretListFunc: func(opts client.SecretListOptions) (client.SecretListResult, error) {
+			assert.Check(t, opts.Filters["name"]["foo_secret"])
+			assert.Check(t, opts.Filters["name"]["bar_secret"])
+			return client.SecretListResult{
+				Items: []swarm.Secret{
+					{Spec: swarm.SecretSpec{Annotations: swarm.Annotations{Name: "foo_secret"}}},
+					{Spec: swarm.SecretSpec{Annotations: swarm.Annotations{Name: "bar_secret"}}},
+				},
 			}, nil
 		},
 	}
-	refs, err := convertServiceSecrets(client, namespace, secrets, secretSpecs)
+	ctx := context.Background()
+	refs, err := convertServiceSecrets(ctx, apiClient, namespace, secrets, secretSpecs)
 	assert.NilError(t, err)
 	expected := []*swarm.SecretReference{
 		{
@@ -511,7 +549,7 @@ func TestConvertServiceSecrets(t *testing.T) {
 				Name: "bar_secret",
 				UID:  "0",
 				GID:  "0",
-				Mode: 0444,
+				Mode: 0o444,
 			},
 		},
 		{
@@ -520,7 +558,7 @@ func TestConvertServiceSecrets(t *testing.T) {
 				Name: "foo_secret",
 				UID:  "0",
 				GID:  "0",
-				Mode: 0444,
+				Mode: 0o444,
 			},
 		},
 	}
@@ -549,19 +587,22 @@ func TestConvertServiceConfigs(t *testing.T) {
 			Name: "baz_config",
 		},
 	}
-	client := &fakeClient{
-		configListFunc: func(opts types.ConfigListOptions) ([]swarm.Config, error) {
-			assert.Check(t, is.Contains(opts.Filters.Get("name"), "foo_config"))
-			assert.Check(t, is.Contains(opts.Filters.Get("name"), "bar_config"))
-			assert.Check(t, is.Contains(opts.Filters.Get("name"), "baz_config"))
-			return []swarm.Config{
-				{Spec: swarm.ConfigSpec{Annotations: swarm.Annotations{Name: "foo_config"}}},
-				{Spec: swarm.ConfigSpec{Annotations: swarm.Annotations{Name: "bar_config"}}},
-				{Spec: swarm.ConfigSpec{Annotations: swarm.Annotations{Name: "baz_config"}}},
+	apiClient := &fakeClient{
+		configListFunc: func(opts client.ConfigListOptions) (client.ConfigListResult, error) {
+			assert.Check(t, opts.Filters["name"]["foo_config"])
+			assert.Check(t, opts.Filters["name"]["bar_config"])
+			assert.Check(t, opts.Filters["name"]["baz_config"])
+			return client.ConfigListResult{
+				Items: []swarm.Config{
+					{Spec: swarm.ConfigSpec{Annotations: swarm.Annotations{Name: "foo_config"}}},
+					{Spec: swarm.ConfigSpec{Annotations: swarm.Annotations{Name: "bar_config"}}},
+					{Spec: swarm.ConfigSpec{Annotations: swarm.Annotations{Name: "baz_config"}}},
+				},
 			}, nil
 		},
 	}
-	refs, err := convertServiceConfigObjs(client, namespace, service, configSpecs)
+	ctx := context.Background()
+	refs, err := convertServiceConfigObjs(ctx, apiClient, namespace, service, configSpecs)
 	assert.NilError(t, err)
 	expected := []*swarm.ConfigReference{
 		{
@@ -570,7 +611,7 @@ func TestConvertServiceConfigs(t *testing.T) {
 				Name: "bar_config",
 				UID:  "0",
 				GID:  "0",
-				Mode: 0444,
+				Mode: 0o444,
 			},
 		},
 		{
@@ -583,7 +624,7 @@ func TestConvertServiceConfigs(t *testing.T) {
 				Name: "foo_config",
 				UID:  "0",
 				GID:  "0",
-				Mode: 0444,
+				Mode: 0o444,
 			},
 		},
 	}
@@ -592,22 +633,22 @@ func TestConvertServiceConfigs(t *testing.T) {
 
 type fakeClient struct {
 	client.Client
-	secretListFunc func(types.SecretListOptions) ([]swarm.Secret, error)
-	configListFunc func(types.ConfigListOptions) ([]swarm.Config, error)
+	secretListFunc func(client.SecretListOptions) (client.SecretListResult, error)
+	configListFunc func(client.ConfigListOptions) (client.ConfigListResult, error)
 }
 
-func (c *fakeClient) SecretList(ctx context.Context, options types.SecretListOptions) ([]swarm.Secret, error) {
+func (c *fakeClient) SecretList(_ context.Context, options client.SecretListOptions) (client.SecretListResult, error) {
 	if c.secretListFunc != nil {
 		return c.secretListFunc(options)
 	}
-	return []swarm.Secret{}, nil
+	return client.SecretListResult{}, nil
 }
 
-func (c *fakeClient) ConfigList(ctx context.Context, options types.ConfigListOptions) ([]swarm.Config, error) {
+func (c *fakeClient) ConfigList(_ context.Context, options client.ConfigListOptions) (client.ConfigListResult, error) {
 	if c.configListFunc != nil {
 		return c.configListFunc(options)
 	}
-	return []swarm.Config{}, nil
+	return client.ConfigListResult{}, nil
 }
 
 func TestConvertUpdateConfigParallelism(t *testing.T) {
@@ -667,9 +708,8 @@ func TestConvertServiceCapAddAndCapDrop(t *testing.T) {
 		},
 	}
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.title, func(t *testing.T) {
-			result, err := Service("1.41", Namespace{name: "foo"}, tc.in, nil, nil, nil, nil)
+			result, err := Service(Namespace{name: "foo"}, tc.in, nil, nil, nil, nil)
 			assert.NilError(t, err)
 			assert.Check(t, is.DeepEqual(result.TaskTemplate.ContainerSpec.CapabilityAdd, tc.out.CapAdd))
 			assert.Check(t, is.DeepEqual(result.TaskTemplate.ContainerSpec.CapabilityDrop, tc.out.CapDrop))

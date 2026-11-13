@@ -1,20 +1,18 @@
----
-title: "secret create"
-description: "The secret create command description and usage"
-keywords: ["secret, create"]
----
-
 # secret create
 
-```Markdown
-Usage:  docker secret create [OPTIONS] SECRET [file|-]
-
+<!---MARKER_GEN_START-->
 Create a secret from a file or STDIN as content
 
-Options:
-  -l, --label list               Secret labels
-      --template-driver string   Template driver
-```
+### Options
+
+| Name                                | Type     | Default | Description     |
+|:------------------------------------|:---------|:--------|:----------------|
+| `-d`, `--driver`                    | `string` |         | Secret driver   |
+| [`-l`](#label), [`--label`](#label) | `list`   |         | Secret labels   |
+| `--template-driver`                 | `string` |         | Template driver |
+
+
+<!---MARKER_GEN_END-->
 
 ## Description
 
@@ -22,8 +20,7 @@ Creates a secret using standard input or from a file for the secret content.
 
 For detailed information about using secrets, refer to [manage sensitive data with Docker secrets](https://docs.docker.com/engine/swarm/secrets/).
 
-> **Note**
->
+> [!NOTE]
 > This is a cluster management command, and must be executed on a swarm
 > manager node. To learn about managers and workers, refer to the
 > [Swarm mode section](https://docs.docker.com/engine/swarm/) in the
@@ -57,7 +54,7 @@ ID                          NAME                CREATED             UPDATED
 dg426haahpi5ezmkkj5kyl3sn   my_secret           7 seconds ago       7 seconds ago
 ```
 
-### Create a secret with labels
+### <a name="label"></a> Create a secret with labels (--label)
 
 ```console
 $ docker secret create \

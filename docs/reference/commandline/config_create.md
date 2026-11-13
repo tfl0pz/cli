@@ -1,20 +1,17 @@
----
-title: "config create"
-description: "The config create command description and usage"
-keywords: ["config, create"]
----
-
 # config create
 
-```Markdown
-Usage:  docker config create [OPTIONS] CONFIG [file|-]
+<!---MARKER_GEN_START-->
+Create a config from a file or STDIN
 
-Create a config from a file or STDIN as content
+### Options
 
-Options:
-  -l, --label list               Config labels
-      --template-driver string   Template driver
-```
+| Name                                | Type     | Default | Description     |
+|:------------------------------------|:---------|:--------|:----------------|
+| [`-l`](#label), [`--label`](#label) | `list`   |         | Config labels   |
+| `--template-driver`                 | `string` |         | Template driver |
+
+
+<!---MARKER_GEN_END-->
 
 ## Description
 
@@ -22,9 +19,8 @@ Creates a config using standard input or from a file for the config content.
 
 For detailed information about using configs, refer to [store configuration data using Docker Configs](https://docs.docker.com/engine/swarm/configs/).
 
-> **Note**
->
-> This is a cluster management command, and must be executed on a swarm
+> [!NOTE]
+> This is a cluster management command, and must be executed on a Swarm
 > manager node. To learn about managers and workers, refer to the
 > [Swarm mode section](https://docs.docker.com/engine/swarm/) in the
 > documentation.
@@ -57,7 +53,7 @@ ID                          NAME                CREATED             UPDATED
 dg426haahpi5ezmkkj5kyl3sn   my_config           7 seconds ago       7 seconds ago
 ```
 
-### Create a config with labels
+### <a name="label"></a> Create a config with labels (-l, --label)
 
 ```console
 $ docker config create \
@@ -90,7 +86,6 @@ $ docker config inspect my_config
     }
 ]
 ```
-
 
 ## Related commands
 

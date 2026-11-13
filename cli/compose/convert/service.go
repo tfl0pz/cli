@@ -1,21 +1,26 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package convert
 
 import (
+	"cmp"
+	"context"
+	"errors"
 	"fmt"
+	"net/netip"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
 	servicecli "github.com/docker/cli/cli/command/service"
 	composetypes "github.com/docker/cli/cli/compose/types"
 	"github.com/docker/cli/opts"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/api/types/versions"
-	"github.com/docker/docker/client"
-	"github.com/docker/go-units"
-	"github.com/pkg/errors"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 )
 
 const (
@@ -26,29 +31,25 @@ const (
 
 // Services from compose-file types to engine API types
 func Services(
+	ctx context.Context,
 	namespace Namespace,
 	config *composetypes.Config,
-	client client.CommonAPIClient,
+	apiClient client.APIClient,
 ) (map[string]swarm.ServiceSpec, error) {
 	result := make(map[string]swarm.ServiceSpec)
-
-	services := config.Services
-	volumes := config.Volumes
-	networks := config.Networks
-
-	for _, service := range services {
-		secrets, err := convertServiceSecrets(client, namespace, service.Secrets, config.Secrets)
+	for _, service := range config.Services {
+		secrets, err := convertServiceSecrets(ctx, apiClient, namespace, service.Secrets, config.Secrets)
 		if err != nil {
-			return nil, errors.Wrapf(err, "service %s", service.Name)
+			return nil, fmt.Errorf("service %s: %w", service.Name, err)
 		}
-		configs, err := convertServiceConfigObjs(client, namespace, service, config.Configs)
+		configs, err := convertServiceConfigObjs(ctx, apiClient, namespace, service, config.Configs)
 		if err != nil {
-			return nil, errors.Wrapf(err, "service %s", service.Name)
+			return nil, fmt.Errorf("service %s: %w", service.Name, err)
 		}
 
-		serviceSpec, err := Service(client.ClientVersion(), namespace, service, networks, volumes, secrets, configs)
+		serviceSpec, err := Service(namespace, service, config.Networks, config.Volumes, secrets, configs)
 		if err != nil {
-			return nil, errors.Wrapf(err, "service %s", service.Name)
+			return nil, fmt.Errorf("service %s: %w", service.Name, err)
 		}
 		result[service.Name] = serviceSpec
 	}
@@ -58,7 +59,6 @@ func Services(
 
 // Service converts a ServiceConfig into a swarm ServiceSpec
 func Service(
-	apiVersion string,
 	namespace Namespace,
 	service composetypes.ServiceConfig,
 	networkConfigs map[string]composetypes.NetworkConfig,
@@ -84,8 +84,7 @@ func Service(
 		return swarm.ServiceSpec{}, err
 	}
 
-	restartPolicy, err := convertRestartPolicy(
-		service.Restart, service.Deploy.RestartPolicy)
+	restartPolicy, err := convertRestartPolicy(service.Restart, service.Deploy.RestartPolicy)
 	if err != nil {
 		return swarm.ServiceSpec{}, err
 	}
@@ -100,7 +99,7 @@ func Service(
 		return swarm.ServiceSpec{}, err
 	}
 
-	dnsConfig := convertDNSConfig(service.DNS, service.DNSSearch)
+	dnsConfig := convertDNSConfig(service.DNS, service.DNSSearch) // TODO(thaJeztah): change service.DNS to a []netip.Addr
 
 	var privileges swarm.Privileges
 	privileges.CredentialSpec, err = convertCredentialSpec(
@@ -123,7 +122,7 @@ func Service(
 	serviceSpec := swarm.ServiceSpec{
 		Annotations: swarm.Annotations{
 			Name:   name,
-			Labels: AddStackLabel(namespace, service.Deploy.Labels),
+			Labels: addStackLabel(namespace, service.Deploy.Labels),
 		},
 		TaskTemplate: swarm.TaskSpec{
 			ContainerSpec: &swarm.ContainerSpec{
@@ -134,8 +133,8 @@ func Service(
 				Hosts:           convertExtraHosts(service.ExtraHosts),
 				DNSConfig:       dnsConfig,
 				Healthcheck:     healthcheck,
-				Env:             sortStrings(convertEnvironment(service.Environment)),
-				Labels:          AddStackLabel(namespace, service.Labels),
+				Env:             convertEnvironment(service.Environment),
+				Labels:          addStackLabel(namespace, service.Labels),
 				Dir:             service.WorkingDir,
 				User:            service.User,
 				Mounts:          mounts,
@@ -153,6 +152,7 @@ func Service(
 				CapabilityAdd:   capAdd,
 				CapabilityDrop:  capDrop,
 				Ulimits:         convertUlimits(service.Ulimits),
+				OomScoreAdj:     service.OomScoreAdj,
 			},
 			LogDriver:     logDriver,
 			Resources:     resources,
@@ -162,6 +162,7 @@ func Service(
 				Preferences: getPlacementPreference(service.Deploy.Placement.Preferences),
 				MaxReplicas: service.Deploy.Placement.MaxReplicas,
 			},
+			Networks: networks,
 		},
 		EndpointSpec:   endpoint,
 		Mode:           mode,
@@ -172,23 +173,15 @@ func Service(
 	// add an image label to serviceSpec
 	serviceSpec.Labels[LabelImage] = service.Image
 
-	// ServiceSpec.Networks is deprecated and should not have been used by
-	// this package. It is possible to update TaskTemplate.Networks, but it
-	// is not possible to update ServiceSpec.Networks. Unfortunately, we
-	// can't unconditionally start using TaskTemplate.Networks, because that
-	// will break with older daemons that don't support migrating from
-	// ServiceSpec.Networks to TaskTemplate.Networks. So which field to use
-	// is conditional on daemon version.
-	if versions.LessThan(apiVersion, "1.29") {
-		serviceSpec.Networks = networks
-	} else {
-		serviceSpec.TaskTemplate.Networks = networks
-	}
 	return serviceSpec, nil
 }
 
 func getPlacementPreference(preferences []composetypes.PlacementPreferences) []swarm.PlacementPreference {
-	result := []swarm.PlacementPreference{}
+	if len(preferences) == 0 {
+		return nil
+	}
+
+	result := make([]swarm.PlacementPreference, 0, len(preferences))
 	for _, preference := range preferences {
 		spreadDescriptor := preference.Spread
 		result = append(result, swarm.PlacementPreference{
@@ -198,11 +191,6 @@ func getPlacementPreference(preferences []composetypes.PlacementPreferences) []s
 		})
 	}
 	return result
-}
-
-func sortStrings(strs []string) []string {
-	sort.Strings(strs)
-	return strs
 }
 
 func convertServiceNetworks(
@@ -217,23 +205,26 @@ func convertServiceNetworks(
 		}
 	}
 
-	nets := []swarm.NetworkAttachmentConfig{}
-	for networkName, network := range networks {
+	nets := make([]swarm.NetworkAttachmentConfig, 0, len(networks))
+	for networkName, nw := range networks {
 		networkConfig, ok := networkConfigs[networkName]
 		if !ok && networkName != defaultNetwork {
-			return nil, errors.Errorf("undefined network %q", networkName)
+			return nil, fmt.Errorf("undefined network %q", networkName)
 		}
 		var aliases []string
-		if network != nil {
-			aliases = network.Aliases
+		var driverOpts map[string]string
+		if nw != nil {
+			aliases = nw.Aliases
+			driverOpts = nw.DriverOpts
 		}
 		target := namespace.Scope(networkName)
 		if networkConfig.Name != "" {
 			target = networkConfig.Name
 		}
 		netAttachConfig := swarm.NetworkAttachmentConfig{
-			Target:  target,
-			Aliases: aliases,
+			Target:     target,
+			Aliases:    aliases,
+			DriverOpts: driverOpts,
 		}
 		// Only add default aliases to user defined networks. Other networks do
 		// not support aliases.
@@ -243,28 +234,29 @@ func convertServiceNetworks(
 		nets = append(nets, netAttachConfig)
 	}
 
-	sort.Slice(nets, func(i, j int) bool {
-		return nets[i].Target < nets[j].Target
+	slices.SortFunc(nets, func(a, b swarm.NetworkAttachmentConfig) int {
+		return cmp.Compare(a.Target, b.Target)
 	})
 	return nets, nil
 }
 
 // TODO: fix secrets API so that SecretAPIClient is not required here
 func convertServiceSecrets(
-	client client.SecretAPIClient,
+	ctx context.Context,
+	apiClient client.SecretAPIClient,
 	namespace Namespace,
 	secrets []composetypes.ServiceSecretConfig,
 	secretSpecs map[string]composetypes.SecretConfig,
 ) ([]*swarm.SecretReference, error) {
-	refs := []*swarm.SecretReference{}
-
 	lookup := func(key string) (composetypes.FileObjectConfig, error) {
 		secretSpec, exists := secretSpecs[key]
 		if !exists {
-			return composetypes.FileObjectConfig{}, errors.Errorf("undefined secret %q", key)
+			return composetypes.FileObjectConfig{}, fmt.Errorf("undefined secret %q", key)
 		}
 		return composetypes.FileObjectConfig(secretSpec), nil
 	}
+
+	refs := make([]*swarm.SecretReference, 0, len(secrets))
 	for _, secret := range secrets {
 		obj, err := convertFileObject(namespace, composetypes.FileReferenceConfig(secret), lookup)
 		if err != nil {
@@ -278,24 +270,27 @@ func convertServiceSecrets(
 		})
 	}
 
-	secrs, err := servicecli.ParseSecrets(client, refs)
+	secrs, err := servicecli.ParseSecrets(ctx, apiClient, refs)
 	if err != nil {
 		return nil, err
 	}
 	// sort to ensure idempotence (don't restart services just because the entries are in different order)
-	sort.SliceStable(secrs, func(i, j int) bool { return secrs[i].SecretName < secrs[j].SecretName })
-	return secrs, err
+	slices.SortStableFunc(secrs, func(a, b *swarm.SecretReference) int {
+		return cmp.Compare(a.SecretName, b.SecretName)
+	})
+	return secrs, nil
 }
 
 // convertServiceConfigObjs takes an API client, a namespace, a ServiceConfig,
 // and a set of compose Config specs, and creates the swarm ConfigReferences
-// required by the serivce. Unlike convertServiceSecrets, this takes the whole
+// required by the service. Unlike convertServiceSecrets, this takes the whole
 // ServiceConfig, because some Configs may be needed as a result of other
 // fields (like CredentialSpecs).
 //
 // TODO: fix configs API so that ConfigsAPIClient is not required here
 func convertServiceConfigObjs(
-	client client.ConfigAPIClient,
+	ctx context.Context,
+	apiClient client.ConfigAPIClient,
 	namespace Namespace,
 	service composetypes.ServiceConfig,
 	configSpecs map[string]composetypes.ConfigObjConfig,
@@ -305,7 +300,7 @@ func convertServiceConfigObjs(
 	lookup := func(key string) (composetypes.FileObjectConfig, error) {
 		configSpec, exists := configSpecs[key]
 		if !exists {
-			return composetypes.FileObjectConfig{}, errors.Errorf("undefined config %q", key)
+			return composetypes.FileObjectConfig{}, fmt.Errorf("undefined config %q", key)
 		}
 		return composetypes.FileObjectConfig(configSpec), nil
 	}
@@ -322,7 +317,7 @@ func convertServiceConfigObjs(
 		})
 	}
 
-	// finally, after converting all of the file objects, create any
+	// finally, after converting all file objects, create any
 	// Runtime-type configs that are needed. these are configs that are not
 	// mounted into the container, but are used in some other way by the
 	// container runtime. Currently, this only means CredentialSpecs, but in
@@ -351,16 +346,17 @@ func convertServiceConfigObjs(
 			ConfigName: name,
 			Runtime:    &swarm.ConfigReferenceRuntimeTarget{},
 		})
-
 	}
 
-	confs, err := servicecli.ParseConfigs(client, refs)
+	confs, err := servicecli.ParseConfigs(ctx, apiClient, refs)
 	if err != nil {
 		return nil, err
 	}
 	// sort to ensure idempotence (don't restart services just because the entries are in different order)
-	sort.SliceStable(confs, func(i, j int) bool { return confs[i].ConfigName < confs[j].ConfigName })
-	return confs, err
+	slices.SortStableFunc(confs, func(a, b *swarm.ConfigReference) int {
+		return cmp.Compare(a.ConfigName, b.ConfigName)
+	})
+	return confs, nil
 }
 
 type swarmReferenceTarget struct {
@@ -406,7 +402,7 @@ func convertFileObject(
 	}
 	mode := config.Mode
 	if mode == nil {
-		mode = uint32Ptr(0444)
+		mode = new(uint32(0o444))
 	}
 
 	return swarmReferenceObject{
@@ -420,18 +416,14 @@ func convertFileObject(
 	}, nil
 }
 
-func uint32Ptr(value uint32) *uint32 {
-	return &value
-}
-
 // convertExtraHosts converts <host>:<ip> mappings to SwarmKit notation:
 // "IP-address hostname(s)". The original order of mappings is preserved.
 func convertExtraHosts(extraHosts composetypes.HostsList) []string {
-	hosts := []string{}
+	hosts := make([]string, 0, len(extraHosts))
 	for _, hostIP := range extraHosts {
-		if v := strings.SplitN(hostIP, ":", 2); len(v) == 2 {
+		if hostName, ipAddr, ok := strings.Cut(hostIP, ":"); ok {
 			// Convert to SwarmKit notation: IP-address hostname(s)
-			hosts = append(hosts, fmt.Sprintf("%s %s", v[1], v[0]))
+			hosts = append(hosts, ipAddr+" "+hostName)
 		}
 	}
 	return hosts
@@ -442,17 +434,16 @@ func convertHealthcheck(healthcheck *composetypes.HealthCheckConfig) (*container
 		return nil, nil
 	}
 	var (
-		timeout, interval, startPeriod time.Duration
-		retries                        int
+		timeout, interval, startPeriod, startInterval time.Duration
+		retries                                       int
 	)
 	if healthcheck.Disable {
 		if len(healthcheck.Test) != 0 {
-			return nil, errors.Errorf("test and disable can't be set at the same time")
+			return nil, errors.New("test and disable can't be set at the same time")
 		}
 		return &container.HealthConfig{
 			Test: []string{"NONE"},
 		}, nil
-
 	}
 	if healthcheck.Timeout != nil {
 		timeout = time.Duration(*healthcheck.Timeout)
@@ -463,66 +454,90 @@ func convertHealthcheck(healthcheck *composetypes.HealthCheckConfig) (*container
 	if healthcheck.StartPeriod != nil {
 		startPeriod = time.Duration(*healthcheck.StartPeriod)
 	}
+	if healthcheck.StartInterval != nil {
+		startInterval = time.Duration(*healthcheck.StartInterval)
+	}
 	if healthcheck.Retries != nil {
 		retries = int(*healthcheck.Retries)
 	}
 	return &container.HealthConfig{
-		Test:        healthcheck.Test,
-		Timeout:     timeout,
-		Interval:    interval,
-		Retries:     retries,
-		StartPeriod: startPeriod,
+		Test:          healthcheck.Test,
+		Timeout:       timeout,
+		Interval:      interval,
+		Retries:       retries,
+		StartPeriod:   startPeriod,
+		StartInterval: startInterval,
 	}, nil
 }
 
-func convertRestartPolicy(restart string, source *composetypes.RestartPolicy) (*swarm.RestartPolicy, error) {
-	// TODO: log if restart is being ignored
-	if source == nil {
-		policy, err := opts.ParseRestartPolicy(restart)
-		if err != nil {
-			return nil, err
-		}
-		switch {
-		case policy.IsNone():
-			return nil, nil
-		case policy.IsAlways(), policy.IsUnlessStopped():
-			return &swarm.RestartPolicy{
-				Condition: swarm.RestartPolicyConditionAny,
-			}, nil
-		case policy.IsOnFailure():
-			attempts := uint64(policy.MaximumRetryCount)
-			return &swarm.RestartPolicy{
-				Condition:   swarm.RestartPolicyConditionOnFailure,
-				MaxAttempts: &attempts,
-			}, nil
-		default:
-			return nil, errors.Errorf("unknown restart policy: %s", restart)
-		}
+// convertRestartPolicy converts the service's restart-policy. It prefers
+// service.deploy.restart_policy, but falls back to parsing the legacy
+// service.restart if service.deploy.restart_policy is not set.
+func convertRestartPolicy(restart string, restartPolicy *composetypes.RestartPolicy) (*swarm.RestartPolicy, error) {
+	// Use service.deploy.restart_policy, if set.
+	if restartPolicy != nil {
+		// TODO: log or error if both "service.restart" and "service.deploy.restartpolicy" are set.
+		return &swarm.RestartPolicy{
+			Condition:   swarm.RestartPolicyCondition(restartPolicy.Condition),
+			Delay:       composetypes.ConvertDurationPtr(restartPolicy.Delay),
+			MaxAttempts: restartPolicy.MaxAttempts,
+			Window:      composetypes.ConvertDurationPtr(restartPolicy.Window),
+		}, nil
+	}
+	if restart == "" {
+		return nil, nil
 	}
 
-	return &swarm.RestartPolicy{
-		Condition:   swarm.RestartPolicyCondition(source.Condition),
-		Delay:       composetypes.ConvertDurationPtr(source.Delay),
-		MaxAttempts: source.MaxAttempts,
-		Window:      composetypes.ConvertDurationPtr(source.Window),
-	}, nil
+	// Fall back to the legacy service.restart restart-policy.
+	policy, err := opts.ParseRestartPolicy(restart)
+	if err != nil {
+		return nil, err
+	}
+	if policy.MaximumRetryCount < 0 {
+		return nil, errors.New("invalid restart policy: maximum retry count cannot be negative")
+	}
+	uint64Ptr := func(i int) *uint64 {
+		if i <= 0 {
+			return nil
+		}
+		return new(uint64(i))
+	}
+
+	switch policy.Name {
+	case container.RestartPolicyDisabled, "":
+		return nil, nil
+	case container.RestartPolicyAlways, container.RestartPolicyUnlessStopped:
+		return &swarm.RestartPolicy{
+			Condition:   swarm.RestartPolicyConditionAny,
+			MaxAttempts: uint64Ptr(policy.MaximumRetryCount),
+		}, nil
+	case container.RestartPolicyOnFailure:
+		return &swarm.RestartPolicy{
+			Condition:   swarm.RestartPolicyConditionOnFailure,
+			MaxAttempts: uint64Ptr(policy.MaximumRetryCount),
+		}, nil
+	default:
+		return nil, fmt.Errorf("invalid restart policy: unknown policy '%s' (must be one of '%s', '%s', '%s', or '%s')",
+			policy.Name, container.RestartPolicyDisabled, container.RestartPolicyAlways, container.RestartPolicyOnFailure, container.RestartPolicyUnlessStopped,
+		)
+	}
 }
 
 func convertUpdateConfig(source *composetypes.UpdateConfig) *swarm.UpdateConfig {
 	if source == nil {
 		return nil
 	}
-	parallel := uint64(1)
+	var parallel uint64 = 1
 	if source.Parallelism != nil {
 		parallel = *source.Parallelism
 	}
 	return &swarm.UpdateConfig{
 		Parallelism:     parallel,
 		Delay:           time.Duration(source.Delay),
-		FailureAction:   source.FailureAction,
+		FailureAction:   swarm.FailureAction(source.FailureAction),
 		Monitor:         time.Duration(source.Monitor),
 		MaxFailureRatio: source.MaxFailureRatio,
-		Order:           source.Order,
+		Order:           swarm.UpdateOrder(source.Order),
 	}
 }
 
@@ -576,20 +591,17 @@ func convertResources(source composetypes.Resources) (*swarm.ResourceRequirement
 }
 
 func convertEndpointSpec(endpointMode string, source []composetypes.ServicePortConfig) *swarm.EndpointSpec {
-	portConfigs := []swarm.PortConfig{}
+	portConfigs := make([]swarm.PortConfig, 0, len(source))
 	for _, port := range source {
-		portConfig := swarm.PortConfig{
-			Protocol:      swarm.PortConfigProtocol(port.Protocol),
+		portConfigs = append(portConfigs, swarm.PortConfig{
+			Protocol:      network.IPProtocol(port.Protocol),
 			TargetPort:    port.Target,
 			PublishedPort: port.Published,
 			PublishMode:   swarm.PortConfigPublishMode(port.Mode),
-		}
-		portConfigs = append(portConfigs, portConfig)
+		})
 	}
 
-	sort.Slice(portConfigs, func(i, j int) bool {
-		return portConfigs[i].PublishedPort < portConfigs[j].PublishedPort
-	})
+	slices.SortFunc(portConfigs, swarm.PortConfig.Compare)
 
 	return &swarm.EndpointSpec{
 		Mode:  swarm.ResolutionMode(strings.ToLower(endpointMode)),
@@ -597,18 +609,19 @@ func convertEndpointSpec(endpointMode string, source []composetypes.ServicePortC
 	}
 }
 
+// convertEnvironment converts key/value mappings to a slice, and sorts
+// the results.
 func convertEnvironment(source map[string]*string) []string {
-	var output []string
-
+	output := make([]string, 0, len(source))
 	for name, value := range source {
 		switch value {
 		case nil:
 			output = append(output, name)
 		default:
-			output = append(output, fmt.Sprintf("%s=%s", name, *value))
+			output = append(output, name+"="+*value)
 		}
 	}
-
+	slices.Sort(output)
 	return output
 }
 
@@ -616,33 +629,57 @@ func convertDeployMode(mode string, replicas *uint64) (swarm.ServiceMode, error)
 	serviceMode := swarm.ServiceMode{}
 
 	switch mode {
+	case "global-job":
+		if replicas != nil {
+			return serviceMode, errors.New("replicas can only be used with replicated or replicated-job mode")
+		}
+		serviceMode.GlobalJob = &swarm.GlobalJob{}
 	case "global":
 		if replicas != nil {
-			return serviceMode, errors.Errorf("replicas can only be used with replicated mode")
+			return serviceMode, errors.New("replicas can only be used with replicated or replicated-job mode")
 		}
 		serviceMode.Global = &swarm.GlobalService{}
+	case "replicated-job":
+		serviceMode.ReplicatedJob = &swarm.ReplicatedJob{
+			MaxConcurrent:    replicas,
+			TotalCompletions: replicas,
+		}
 	case "replicated", "":
 		serviceMode.Replicated = &swarm.ReplicatedService{Replicas: replicas}
 	default:
-		return serviceMode, errors.Errorf("Unknown mode: %s", mode)
+		return serviceMode, fmt.Errorf("unknown mode: %s", mode)
 	}
 	return serviceMode, nil
 }
 
-func convertDNSConfig(DNS []string, DNSSearch []string) *swarm.DNSConfig {
-	if DNS != nil || DNSSearch != nil {
+func convertDNSConfig(dns []string, dnsSearch []string) *swarm.DNSConfig {
+	if len(dns) > 0 || len(dnsSearch) > 0 {
 		return &swarm.DNSConfig{
-			Nameservers: DNS,
-			Search:      DNSSearch,
+			Nameservers: toNetipAddrSlice(dns),
+			Search:      dnsSearch,
 		}
 	}
 	return nil
 }
 
+func toNetipAddrSlice(ips []string) []netip.Addr {
+	if len(ips) == 0 {
+		return nil
+	}
+	netIPs := make([]netip.Addr, 0, len(ips))
+	for _, ip := range ips {
+		addr, err := netip.ParseAddr(ip)
+		if err != nil {
+			continue
+		}
+		netIPs = append(netIPs, addr)
+	}
+	return netIPs
+}
+
 func convertCredentialSpec(namespace Namespace, spec composetypes.CredentialSpecConfig, refs []*swarm.ConfigReference) (*swarm.CredentialSpec, error) {
 	var o []string
 
-	// Config was added in API v1.40
 	if spec.Config != "" {
 		o = append(o, `"Config"`)
 	}
@@ -657,9 +694,9 @@ func convertCredentialSpec(namespace Namespace, spec composetypes.CredentialSpec
 	case l == 0:
 		return nil, nil
 	case l == 2:
-		return nil, errors.Errorf("invalid credential spec: cannot specify both %s and %s", o[0], o[1])
+		return nil, fmt.Errorf("invalid credential spec: cannot specify both %s and %s", o[0], o[1])
 	case l > 2:
-		return nil, errors.Errorf("invalid credential spec: cannot specify both %s, and %s", strings.Join(o[:l-1], ", "), o[l-1])
+		return nil, fmt.Errorf("invalid credential spec: cannot specify both %s, and %s", strings.Join(o[:l-1], ", "), o[l-1])
 	}
 	swarmCredSpec := swarm.CredentialSpec(spec)
 	// if we're using a swarm Config for the credential spec, over-write it
@@ -678,34 +715,28 @@ func convertCredentialSpec(namespace Namespace, spec composetypes.CredentialSpec
 				return &swarmCredSpec, nil
 			}
 		}
-		return nil, errors.Errorf("invalid credential spec: spec specifies config %v, but no such config can be found", swarmCredSpec.Config)
+		return nil, fmt.Errorf("invalid credential spec: spec specifies config %v, but no such config can be found", swarmCredSpec.Config)
 	}
 	return &swarmCredSpec, nil
 }
 
-func convertUlimits(origUlimits map[string]*composetypes.UlimitsConfig) []*units.Ulimit {
-	newUlimits := make(map[string]*units.Ulimit)
+func convertUlimits(origUlimits map[string]*composetypes.UlimitsConfig) []*container.Ulimit {
+	ulimits := make([]*container.Ulimit, 0, len(origUlimits))
 	for name, u := range origUlimits {
+		soft, hard := int64(u.Soft), int64(u.Hard)
 		if u.Single != 0 {
-			newUlimits[name] = &units.Ulimit{
-				Name: name,
-				Soft: int64(u.Single),
-				Hard: int64(u.Single),
-			}
-		} else {
-			newUlimits[name] = &units.Ulimit{
-				Name: name,
-				Soft: int64(u.Soft),
-				Hard: int64(u.Hard),
-			}
+			soft, hard = int64(u.Single), int64(u.Single)
 		}
+
+		ulimits = append(ulimits, &container.Ulimit{
+			Name: name,
+			Soft: soft,
+			Hard: hard,
+		})
 	}
-	var ulimits []*units.Ulimit
-	for _, ulimit := range newUlimits {
-		ulimits = append(ulimits, ulimit)
-	}
-	sort.SliceStable(ulimits, func(i, j int) bool {
-		return ulimits[i].Name < ulimits[j].Name
+
+	slices.SortFunc(ulimits, func(a, b *container.Ulimit) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 	return ulimits
 }

@@ -1,12 +1,12 @@
 package checkpoint
 
 import (
-	"io/ioutil"
+	"errors"
+	"io"
 	"testing"
 
 	"github.com/docker/cli/internal/test"
-	"github.com/docker/docker/api/types"
-	"github.com/pkg/errors"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
@@ -14,21 +14,21 @@ import (
 func TestCheckpointRemoveErrors(t *testing.T) {
 	testCases := []struct {
 		args                 []string
-		checkpointDeleteFunc func(container string, options types.CheckpointDeleteOptions) error
+		checkpointDeleteFunc func(container string, options client.CheckpointRemoveOptions) (client.CheckpointRemoveResult, error)
 		expectedError        string
 	}{
 		{
 			args:          []string{"too-few-arguments"},
-			expectedError: "requires exactly 2 arguments",
+			expectedError: "requires 2 arguments",
 		},
 		{
 			args:          []string{"too", "many", "arguments"},
-			expectedError: "requires exactly 2 arguments",
+			expectedError: "requires 2 arguments",
 		},
 		{
 			args: []string{"foo", "bar"},
-			checkpointDeleteFunc: func(container string, options types.CheckpointDeleteOptions) error {
-				return errors.Errorf("error deleting checkpoint")
+			checkpointDeleteFunc: func(container string, options client.CheckpointRemoveOptions) (client.CheckpointRemoveResult, error) {
+				return client.CheckpointRemoveResult{}, errors.New("error deleting checkpoint")
 			},
 			expectedError: "error deleting checkpoint",
 		},
@@ -40,7 +40,8 @@ func TestCheckpointRemoveErrors(t *testing.T) {
 		})
 		cmd := newRemoveCommand(cli)
 		cmd.SetArgs(tc.args)
-		cmd.SetOut(ioutil.Discard)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
 		assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
 	}
 }
@@ -48,16 +49,16 @@ func TestCheckpointRemoveErrors(t *testing.T) {
 func TestCheckpointRemoveWithOptions(t *testing.T) {
 	var containerID, checkpointID, checkpointDir string
 	cli := test.NewFakeCli(&fakeClient{
-		checkpointDeleteFunc: func(container string, options types.CheckpointDeleteOptions) error {
+		checkpointDeleteFunc: func(container string, options client.CheckpointRemoveOptions) (client.CheckpointRemoveResult, error) {
 			containerID = container
 			checkpointID = options.CheckpointID
 			checkpointDir = options.CheckpointDir
-			return nil
+			return client.CheckpointRemoveResult{}, nil
 		},
 	})
 	cmd := newRemoveCommand(cli)
 	cmd.SetArgs([]string{"container-foo", "checkpoint-bar"})
-	cmd.Flags().Set("checkpoint-dir", "/dir/foo")
+	assert.Check(t, cmd.Flags().Set("checkpoint-dir", "/dir/foo"))
 	assert.NilError(t, cmd.Execute())
 	assert.Check(t, is.Equal("container-foo", containerID))
 	assert.Check(t, is.Equal("checkpoint-bar", checkpointID))

@@ -8,14 +8,13 @@ import (
 	"time"
 
 	"github.com/docker/cli/internal/test"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/pkg/stringid"
+	"github.com/moby/moby/api/types/image"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
 
 func TestImageContext(t *testing.T) {
-	imageID := stringid.GenerateRandomID()
+	imageID := test.RandomID()
 	unix := time.Now().Unix()
 	zeroTime := int64(-62135596800)
 
@@ -26,66 +25,61 @@ func TestImageContext(t *testing.T) {
 		call     func() string
 	}{
 		{
-			imageCtx: imageContext{i: types.ImageSummary{ID: imageID}, trunc: true},
-			expValue: stringid.TruncateID(imageID),
+			imageCtx: imageContext{i: image.Summary{ID: imageID}, trunc: true},
+			expValue: TruncateID(imageID),
 			call:     ctx.ID,
 		},
 		{
-			imageCtx: imageContext{i: types.ImageSummary{ID: imageID}, trunc: false},
+			imageCtx: imageContext{i: image.Summary{ID: imageID}, trunc: false},
 			expValue: imageID,
 			call:     ctx.ID,
 		},
 		{
-			imageCtx: imageContext{i: types.ImageSummary{Size: 10, VirtualSize: 10}, trunc: true},
+			imageCtx: imageContext{i: image.Summary{Size: 10}, trunc: true},
 			expValue: "10B",
 			call:     ctx.Size,
 		},
 		{
-			imageCtx: imageContext{i: types.ImageSummary{Created: unix}, trunc: true},
+			imageCtx: imageContext{i: image.Summary{Created: unix}, trunc: true},
 			expValue: time.Unix(unix, 0).String(), call: ctx.CreatedAt,
 		},
 		// FIXME
 		// {imageContext{
-		// 	i:     types.ImageSummary{Created: unix},
+		// 	i:     image.Summary{Created: unix},
 		// 	trunc: true,
 		// }, units.HumanDuration(time.Unix(unix, 0)), createdSinceHeader, ctx.CreatedSince},
 		{
-			imageCtx: imageContext{i: types.ImageSummary{}, repo: "busybox"},
+			imageCtx: imageContext{i: image.Summary{}, repo: "busybox"},
 			expValue: "busybox",
 			call:     ctx.Repository,
 		},
 		{
-			imageCtx: imageContext{i: types.ImageSummary{}, tag: "latest"},
+			imageCtx: imageContext{i: image.Summary{}, tag: "latest"},
 			expValue: "latest",
 			call:     ctx.Tag,
 		},
 		{
-			imageCtx: imageContext{i: types.ImageSummary{}, digest: "sha256:d149ab53f8718e987c3a3024bb8aa0e2caadf6c0328f1d9d850b2a2a67f2819a"},
+			imageCtx: imageContext{i: image.Summary{}, digest: "sha256:d149ab53f8718e987c3a3024bb8aa0e2caadf6c0328f1d9d850b2a2a67f2819a"},
 			expValue: "sha256:d149ab53f8718e987c3a3024bb8aa0e2caadf6c0328f1d9d850b2a2a67f2819a",
 			call:     ctx.Digest,
 		},
 		{
-			imageCtx: imageContext{i: types.ImageSummary{Containers: 10}},
+			imageCtx: imageContext{i: image.Summary{Containers: 10}},
 			expValue: "10",
 			call:     ctx.Containers,
 		},
 		{
-			imageCtx: imageContext{i: types.ImageSummary{VirtualSize: 10000}},
-			expValue: "10kB",
-			call:     ctx.VirtualSize,
-		},
-		{
-			imageCtx: imageContext{i: types.ImageSummary{SharedSize: 10000}},
+			imageCtx: imageContext{i: image.Summary{SharedSize: 10000}},
 			expValue: "10kB",
 			call:     ctx.SharedSize,
 		},
 		{
-			imageCtx: imageContext{i: types.ImageSummary{SharedSize: 5000, VirtualSize: 20000}},
+			imageCtx: imageContext{i: image.Summary{SharedSize: 5000, Size: 20000}},
 			expValue: "15kB",
 			call:     ctx.UniqueSize,
 		},
 		{
-			imageCtx: imageContext{i: types.ImageSummary{Created: zeroTime}},
+			imageCtx: imageContext{i: image.Summary{Created: zeroTime}},
 			expValue: "",
 			call:     ctx.CreatedSince,
 		},
@@ -119,8 +113,7 @@ func TestImageContextWrite(t *testing.T) {
 					Format: "{{InvalidFunction}}",
 				},
 			},
-			`Template parsing error: template: :1: function "InvalidFunction" not defined
-`,
+			`template parsing error: template: :1: function "InvalidFunction" not defined`,
 		},
 		{
 			ImageContext{
@@ -128,8 +121,7 @@ func TestImageContextWrite(t *testing.T) {
 					Format: "{{nil}}",
 				},
 			},
-			`Template parsing error: template: :1:2: executing "" at <nil>: nil is not a command
-`,
+			`template parsing error: template: :1:2: executing "" at <nil>: nil is not a command`,
 		},
 		// Table Format
 		{
@@ -150,7 +142,7 @@ image        tag2      imageID2   N/A            0B
 					Format: NewImageFormat("table {{.Repository}}", false, false),
 				},
 			},
-			"REPOSITORY\nimage\nimage\n<none>\n",
+			"REPOSITORY\nimage\nimage\n<none>\n", //nolint:dupword  // ignore "Duplicate words (image) found"
 		},
 		{
 			ImageContext{
@@ -171,7 +163,7 @@ image        <none>
 					Format: NewImageFormat("table {{.Repository}}", true, false),
 				},
 			},
-			"REPOSITORY\nimage\nimage\n<none>\n",
+			"REPOSITORY\nimage\nimage\n<none>\n", //nolint:dupword  // ignore "Duplicate words (image) found"
 		},
 		{
 			ImageContext{
@@ -286,7 +278,7 @@ image_id: imageID3
 					Format: NewImageFormat("{{.Repository}}", false, false),
 				},
 			},
-			"image\nimage\n<none>\n",
+			"image\nimage\n<none>\n", //nolint:dupword  // ignore "Duplicate words (image) found"
 		},
 		{
 			ImageContext{
@@ -295,18 +287,17 @@ image_id: imageID3
 				},
 				Digest: true,
 			},
-			"image\nimage\n<none>\n",
+			"image\nimage\n<none>\n", //nolint:dupword  // ignore "Duplicate words (image) found"
 		},
 	}
 
-	images := []types.ImageSummary{
+	images := []image.Summary{
 		{ID: "imageID1", RepoTags: []string{"image:tag1"}, RepoDigests: []string{"image@sha256:cbbf2f9a99b47fc460d422812b6a5adff7dfee951d8fa2e4a98caa0382cfbdbf"}, Created: unixTime},
 		{ID: "imageID2", RepoTags: []string{"image:tag2"}, Created: zeroTime},
 		{ID: "imageID3", RepoTags: []string{"<none>:<none>"}, RepoDigests: []string{"<none>@<none>"}, Created: unixTime},
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(string(tc.context.Format), func(t *testing.T) {
 			var out bytes.Buffer
 			tc.context.Output = &out
@@ -322,7 +313,7 @@ image_id: imageID3
 
 func TestImageContextWriteWithNoImage(t *testing.T) {
 	out := bytes.NewBufferString("")
-	images := []types.ImageSummary{}
+	images := []image.Summary{}
 
 	cases := []struct {
 		context  ImageContext
@@ -367,7 +358,6 @@ func TestImageContextWriteWithNoImage(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(string(tc.context.Format), func(t *testing.T) {
 			err := ImageWrite(tc.context, images)
 			assert.NilError(t, err)

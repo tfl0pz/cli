@@ -1,0 +1,98 @@
+package trust
+
+import (
+	"cmp"
+	"context"
+	"fmt"
+	"io"
+	"slices"
+
+	"github.com/docker/cli/cli/command"
+	"github.com/docker/cli/cli/command/formatter"
+	"github.com/fvbommel/sortorder"
+	"github.com/theupdateframework/notary/client"
+)
+
+func prettyPrintTrustInfo(ctx context.Context, dockerCLI command.Cli, remote string) error {
+	signatureRows, adminRolesWithSigs, delegationRoles, err := lookupTrustInfo(ctx, dockerCLI, remote)
+	if err != nil {
+		return err
+	}
+
+	if len(signatureRows) > 0 {
+		_, _ = fmt.Fprintf(dockerCLI.Out(), "\nSignatures for %s\n\n", remote)
+
+		if err := printSignatures(dockerCLI.Out(), signatureRows); err != nil {
+			return err
+		}
+	} else {
+		_, _ = fmt.Fprintf(dockerCLI.Out(), "\nNo signatures for %s\n\n", remote)
+	}
+	signerRoleToKeyIDs := getDelegationRoleToKeyMap(delegationRoles)
+
+	// If we do not have additional signers, do not display
+	if len(signerRoleToKeyIDs) > 0 {
+		_, _ = fmt.Fprintf(dockerCLI.Out(), "\nList of signers and their keys for %s\n\n", remote)
+		if err := printSignerInfo(dockerCLI.Out(), signerRoleToKeyIDs); err != nil {
+			return err
+		}
+	}
+
+	// This will always have the root and targets information
+	_, _ = fmt.Fprintf(dockerCLI.Out(), "\nAdministrative keys for %s\n\n", remote)
+	printSortedAdminKeys(dockerCLI.Out(), adminRolesWithSigs)
+	return nil
+}
+
+func printSortedAdminKeys(out io.Writer, adminRoles []client.RoleWithSignatures) {
+	// Sort by name in descending order.
+	slices.SortFunc(adminRoles, func(a, b client.RoleWithSignatures) int {
+		return cmp.Compare(b.Name, a.Name)
+	})
+	for _, adminRole := range adminRoles {
+		if formattedAdminRole := formatAdminRole(adminRole); formattedAdminRole != "" {
+			_, _ = fmt.Fprintf(out, "  %s", formattedAdminRole)
+		}
+	}
+}
+
+// pretty print with ordered rows
+func printSignatures(out io.Writer, signatureRows []trustTagRow) error {
+	trustTagCtx := formatter.Context{
+		Output: out,
+		Format: defaultTrustTagTableFormat,
+	}
+	// convert the formatted type before printing
+	formattedTags := []signedTagInfo{}
+	for _, sigRow := range signatureRows {
+		formattedSigners := sigRow.Signers
+		if len(formattedSigners) == 0 {
+			formattedSigners = append(formattedSigners, fmt.Sprintf("(%s)", releasedRoleName))
+		}
+		formattedTags = append(formattedTags, signedTagInfo{
+			Name:    sigRow.SignedTag,
+			Digest:  sigRow.Digest,
+			Signers: formattedSigners,
+		})
+	}
+	return tagWrite(trustTagCtx, formattedTags)
+}
+
+func printSignerInfo(out io.Writer, roleToKeyIDs map[string][]string) error {
+	signerInfoCtx := formatter.Context{
+		Output: out,
+		Format: defaultSignerInfoTableFormat,
+		Trunc:  true,
+	}
+	formattedSignerInfo := make([]signerInfo, 0, len(roleToKeyIDs))
+	for name, keyIDs := range roleToKeyIDs {
+		formattedSignerInfo = append(formattedSignerInfo, signerInfo{
+			Name: name,
+			Keys: keyIDs,
+		})
+	}
+	slices.SortFunc(formattedSignerInfo, func(a, b signerInfo) int {
+		return sortorder.NaturalCompare(a.Name, b.Name)
+	})
+	return signerInfoWrite(signerInfoCtx, formattedSignerInfo)
+}

@@ -1,0 +1,166 @@
+name: build
+
+# Default to 'contents: read', which grants actions to read commits.
+#
+# If any permission is set, any permission not included in the list is
+# implicitly set to "none".
+#
+# see https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#permissions
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  VERSION: ${{ github.ref }}
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'master'
+      - '[0-9]+.[0-9]+'
+      - '[0-9]+.x'
+    tags:
+      - 'v*'
+  pull_request:
+
+jobs:
+  prepare:
+    runs-on: ubuntu-26.04
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      -
+        name: Create matrix
+        id: platforms
+        run: |
+          echo "matrix=$(docker buildx bake cross --print | jq -cr '.target."cross".platforms')" >>${GITHUB_OUTPUT}
+      -
+        name: Show matrix
+        run: |
+          echo ${{ steps.platforms.outputs.matrix }}
+
+  build:
+    runs-on: ubuntu-26.04
+    needs:
+      - prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - binary
+          - dynbinary
+        platform: ${{ fromJson(needs.prepare.outputs.matrix) }}
+        use_glibc:
+          - ""
+          - glibc
+    steps:
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      -
+        name: Build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          targets: ${{ matrix.target }}
+          set: |
+            *.platform=${{ matrix.platform }}
+        env:
+          USE_GLIBC: ${{ matrix.use_glibc }}
+      -
+        name: Create tarball
+        working-directory: ./build
+        run: |
+          mkdir /tmp/out
+          platformPair=${PLATFORM//\//-}
+          tar -cvzf "/tmp/out/docker-${platformPair}.tar.gz" .
+          if [ -z "${{ matrix.use_glibc }}" ]; then
+            echo "ARTIFACT_NAME=${{ matrix.target }}-${platformPair}" >> $GITHUB_ENV
+          else
+            echo "ARTIFACT_NAME=${{ matrix.target }}-${platformPair}-glibc" >> $GITHUB_ENV
+          fi
+        env:
+          PLATFORM: ${{ matrix.platform }}
+      -
+        name: Upload artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: /tmp/out/*
+          if-no-files-found: error
+
+  bin-image:
+    if: ${{ github.event_name != 'pull_request' && github.repository == 'docker/cli' }}
+    uses: docker/github-builder/.github/workflows/bake.yml@a31d2311da4d55e21b978c1c52bab82ba97d51ee # v1.19.0
+    permissions:
+      contents: read # same as global permission
+      id-token: write # for signing attestation(s) and authenticating to Docker Hub with GitHub OIDC Token
+    with:
+      setup-qemu: true
+      target: bin-image-cross
+      cache: true
+      cache-scope: bin-image
+      output: image
+      push: true
+      vars: |
+        VERSION=${{ github.ref }}
+      meta-images: |
+        dockereng/cli-bin
+      meta-tags: |
+        type=semver,pattern={{version}}
+        type=ref,event=branch
+        type=ref,event=pr
+        type=semver,pattern={{major}}
+        type=semver,pattern={{major}}.{{minor}}
+      registry-identities: |
+        - type: dockerhub
+          username: dockereng
+          connection_id: ${{ vars.DOCKERHUB_OIDC_CONNECTIONID }}
+
+  prepare-plugins:
+    runs-on: ubuntu-26.04
+    outputs:
+      matrix: ${{ steps.platforms.outputs.matrix }}
+    steps:
+      -
+        name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      -
+        name: Create matrix
+        id: platforms
+        run: |
+          echo "matrix=$(docker buildx bake plugins-cross --print | jq -cr '.target."plugins-cross".platforms')" >>${GITHUB_OUTPUT}
+      -
+        name: Show matrix
+        run: |
+          echo ${{ steps.platforms.outputs.matrix }}
+
+  plugins:
+    runs-on: ubuntu-26.04
+    needs:
+      - prepare-plugins
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(needs.prepare-plugins.outputs.matrix) }}
+    steps:
+      -
+        name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      -
+        name: Build
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
+        with:
+          targets: plugins-cross
+          set: |
+            *.platform=${{ matrix.platform }}

@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/docker/cli/cli/command/formatter"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/pkg/stringid"
-	units "github.com/docker/go-units"
+	"github.com/docker/go-units"
+	"github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/client"
 )
 
 const (
@@ -20,10 +20,9 @@ const (
 	commentHeader   = "COMMENT"
 )
 
-// NewHistoryFormat returns a format for rendering an HistoryContext
-func NewHistoryFormat(source string, quiet bool, human bool) formatter.Format {
-	switch source {
-	case formatter.TableFormatKey:
+// newHistoryFormat returns a format for rendering a historyContext.
+func newHistoryFormat(source string, quiet bool, human bool) formatter.Format {
+	if source == formatter.TableFormatKey {
 		switch {
 		case quiet:
 			return formatter.DefaultQuietFormat
@@ -37,27 +36,32 @@ func NewHistoryFormat(source string, quiet bool, human bool) formatter.Format {
 	return formatter.Format(source)
 }
 
-// HistoryWrite writes the context
-func HistoryWrite(ctx formatter.Context, human bool, histories []image.HistoryResponseItem) error {
-	render := func(format func(subContext formatter.SubContext) error) error {
-		for _, history := range histories {
-			historyCtx := &historyContext{trunc: ctx.Trunc, h: history, human: human}
-			if err := format(historyCtx); err != nil {
+// historyWrite writes the context
+func historyWrite(fmtCtx formatter.Context, human bool, history client.ImageHistoryResult) error {
+	historyCtx := &historyContext{
+		HeaderContext: formatter.HeaderContext{
+			Header: formatter.SubHeaderContext{
+				"ID":           historyIDHeader,
+				"CreatedSince": formatter.CreatedSinceHeader,
+				"CreatedAt":    formatter.CreatedAtHeader,
+				"CreatedBy":    createdByHeader,
+				"Size":         formatter.SizeHeader,
+				"Comment":      commentHeader,
+			},
+		},
+	}
+	return fmtCtx.Write(historyCtx, func(format func(subContext formatter.SubContext) error) error {
+		for _, h := range history.Items {
+			if err := format(&historyContext{
+				trunc: fmtCtx.Trunc,
+				h:     h,
+				human: human,
+			}); err != nil {
 				return err
 			}
 		}
 		return nil
-	}
-	historyCtx := &historyContext{}
-	historyCtx.Header = formatter.SubHeaderContext{
-		"ID":           historyIDHeader,
-		"CreatedSince": formatter.CreatedSinceHeader,
-		"CreatedAt":    formatter.CreatedAtHeader,
-		"CreatedBy":    createdByHeader,
-		"Size":         formatter.SizeHeader,
-		"Comment":      commentHeader,
-	}
-	return ctx.Write(historyCtx, render)
+	})
 }
 
 type historyContext struct {
@@ -73,7 +77,7 @@ func (c *historyContext) MarshalJSON() ([]byte, error) {
 
 func (c *historyContext) ID() string {
 	if c.trunc {
-		return stringid.TruncateID(c.h.ID)
+		return formatter.TruncateID(c.h.ID)
 	}
 	return c.h.ID
 }
@@ -82,16 +86,22 @@ func (c *historyContext) CreatedAt() string {
 	return time.Unix(c.h.Created, 0).Format(time.RFC3339)
 }
 
+// epoch is the time before which created-at dates are not displayed with human units.
+var epoch = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC).Unix()
+
 func (c *historyContext) CreatedSince() string {
 	if !c.human {
 		return c.CreatedAt()
+	}
+	if c.h.Created <= epoch {
+		return "N/A"
 	}
 	created := units.HumanDuration(time.Now().UTC().Sub(time.Unix(c.h.Created, 0)))
 	return created + " ago"
 }
 
 func (c *historyContext) CreatedBy() string {
-	createdBy := strings.Replace(c.h.CreatedBy, "\t", " ", -1)
+	createdBy := strings.ReplaceAll(c.h.CreatedBy, "\t", " ")
 	if c.trunc {
 		return formatter.Ellipsis(createdBy, 45)
 	}

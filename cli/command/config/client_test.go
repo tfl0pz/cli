@@ -3,43 +3,41 @@ package config
 import (
 	"context"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/client"
 )
 
 type fakeClient struct {
 	client.Client
-	configCreateFunc  func(swarm.ConfigSpec) (types.ConfigCreateResponse, error)
-	configInspectFunc func(string) (swarm.Config, []byte, error)
-	configListFunc    func(types.ConfigListOptions) ([]swarm.Config, error)
-	configRemoveFunc  func(string) error
+	configCreateFunc  func(context.Context, client.ConfigCreateOptions) (client.ConfigCreateResult, error)
+	configInspectFunc func(context.Context, string, client.ConfigInspectOptions) (client.ConfigInspectResult, error)
+	configListFunc    func(context.Context, client.ConfigListOptions) (client.ConfigListResult, error)
+	configRemoveFunc  func(context.Context, string, client.ConfigRemoveOptions) (client.ConfigRemoveResult, error)
 }
 
-func (c *fakeClient) ConfigCreate(ctx context.Context, spec swarm.ConfigSpec) (types.ConfigCreateResponse, error) {
+func (c *fakeClient) ConfigCreate(ctx context.Context, options client.ConfigCreateOptions) (client.ConfigCreateResult, error) {
 	if c.configCreateFunc != nil {
-		return c.configCreateFunc(spec)
+		return c.configCreateFunc(ctx, options)
 	}
-	return types.ConfigCreateResponse{}, nil
+	return client.ConfigCreateResult{}, nil
 }
 
-func (c *fakeClient) ConfigInspectWithRaw(ctx context.Context, id string) (swarm.Config, []byte, error) {
+func (c *fakeClient) ConfigInspect(ctx context.Context, id string, options client.ConfigInspectOptions) (client.ConfigInspectResult, error) {
 	if c.configInspectFunc != nil {
-		return c.configInspectFunc(id)
+		return c.configInspectFunc(ctx, id, options)
 	}
-	return swarm.Config{}, nil, nil
+	return client.ConfigInspectResult{}, nil
 }
 
-func (c *fakeClient) ConfigList(ctx context.Context, options types.ConfigListOptions) ([]swarm.Config, error) {
+func (c *fakeClient) ConfigList(ctx context.Context, options client.ConfigListOptions) (client.ConfigListResult, error) {
 	if c.configListFunc != nil {
-		return c.configListFunc(options)
+		return c.configListFunc(ctx, options)
 	}
-	return []swarm.Config{}, nil
+	return client.ConfigListResult{}, nil
 }
 
-func (c *fakeClient) ConfigRemove(ctx context.Context, name string) error {
+func (c *fakeClient) ConfigRemove(ctx context.Context, name string, options client.ConfigRemoveOptions) (client.ConfigRemoveResult, error) {
 	if c.configRemoveFunc != nil {
-		return c.configRemoveFunc(name)
+		return c.configRemoveFunc(ctx, name, options)
 	}
-	return nil
+	return client.ConfigRemoveResult{}, nil
 }

@@ -2,29 +2,36 @@
 Please make sure you've read and understood our contributing guidelines;
 https://github.com/docker/cli/blob/master/CONTRIBUTING.md
 
-** Make sure all your commits include a signature generated with `git commit -s` **
+Make sure commits are signed off (`git commit -s`) with your real name.
 
-For additional information on our contributing process, read our contributing
-guide https://docs.docker.com/opensource/code/
+If the PR relates to an existing issue or PR, mention it at the top:
 
-If this is a bug fix, make sure your description includes "fixes #xxxx", or
-"closes #xxxx"
-
-Please provide the following information:
+- Fixes: https://github.com/docker/cli/issues/12345678
+- Replaces: https://github.com/docker/cli/pull/12345678
+- Follow up to: https://github.com/docker/cli/pull/12345678
+- Related to: https://github.com/docker/cli/issues/12345678
 -->
 
-**- What I did**
+## Summary
 
-**- How I did it**
+## Release notes (optional)
 
-**- How to verify it**
-
-**- Description for the changelog**
 <!--
-Write a short (one line) summary that describes the changes in this
-pull request for inclusion in the changelog:
+One-sentence user-facing release note.
+Leave empty if the change is not changelog-worthy.
+Use present tense and imperative tone.
+
+Good:
+- Fix a panic when running `docker top` on a non-running Windows container.
+- Don't print warnings in `docker info` for broken symlinks in CLI plugin directories.
+
+Bad:
+- Refactor test TestFooWithBar
+- Fixed a panic when running docker top
 -->
 
+```markdown changelog
 
-**- A picture of a cute animal (not mandatory but encouraged)**
+```
 
+## A picture of a cute animal (not mandatory but encouraged)

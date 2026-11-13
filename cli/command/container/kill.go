@@ -2,12 +2,13 @@ package container
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
-	"github.com/pkg/errors"
+	"github.com/docker/cli/cli/command/completion"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -17,8 +18,8 @@ type killOptions struct {
 	containers []string
 }
 
-// NewKillCommand creates a new cobra.Command for `docker kill`
-func NewKillCommand(dockerCli command.Cli) *cobra.Command {
+// newKillCommand creates a new cobra.Command for "docker container kill"
+func newKillCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts killOptions
 
 	cmd := &cobra.Command{
@@ -27,30 +28,39 @@ func NewKillCommand(dockerCli command.Cli) *cobra.Command {
 		Args:  cli.RequiresMinArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.containers = args
-			return runKill(dockerCli, &opts)
+			return runKill(cmd.Context(), dockerCLI, &opts)
 		},
+		Annotations: map[string]string{
+			"aliases": "docker container kill, docker kill",
+		},
+		ValidArgsFunction:     completion.ContainerNames(dockerCLI, false),
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
-	flags.StringVarP(&opts.signal, "signal", "s", "KILL", "Signal to send to the container")
+	flags.StringVarP(&opts.signal, "signal", "s", "", "Signal to send to the container")
+
+	_ = cmd.RegisterFlagCompletionFunc("signal", completeSignals)
+
 	return cmd
 }
 
-func runKill(dockerCli command.Cli, opts *killOptions) error {
-	var errs []string
-	ctx := context.Background()
+func runKill(ctx context.Context, dockerCLI command.Cli, opts *killOptions) error {
+	apiClient := dockerCLI.Client()
 	errChan := parallelOperation(ctx, opts.containers, func(ctx context.Context, container string) error {
-		return dockerCli.Client().ContainerKill(ctx, container, opts.signal)
+		_, err := apiClient.ContainerKill(ctx, container, client.ContainerKillOptions{
+			Signal: opts.signal,
+		})
+		return err
 	})
+
+	var errs []error
 	for _, name := range opts.containers {
 		if err := <-errChan; err != nil {
-			errs = append(errs, err.Error())
-		} else {
-			fmt.Fprintln(dockerCli.Out(), name)
+			errs = append(errs, err)
+			continue
 		}
+		_, _ = fmt.Fprintln(dockerCLI.Out(), name)
 	}
-	if len(errs) > 0 {
-		return errors.New(strings.Join(errs, "\n"))
-	}
-	return nil
+	return errors.Join(errs...)
 }

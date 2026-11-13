@@ -3,13 +3,11 @@ package image
 import (
 	"fmt"
 	"io"
-	"io/ioutil"
-	"strings"
+	"net/http"
 	"testing"
 
 	"github.com/docker/cli/internal/test"
-	"github.com/docker/cli/internal/test/notary"
-	"github.com/docker/docker/api/types"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/golden"
@@ -23,12 +21,12 @@ func TestNewPullCommandErrors(t *testing.T) {
 	}{
 		{
 			name:          "wrong-args",
-			expectedError: "requires exactly 1 argument.",
+			expectedError: "requires 1 argument",
 			args:          []string{},
 		},
 		{
 			name:          "invalid-name",
-			expectedError: "invalid reference format: repository name must be lowercase",
+			expectedError: "invalid reference format: repository name (library/UPPERCASE_REPO) must be lowercase",
 			args:          []string{"UPPERCASE_REPO"},
 		},
 		{
@@ -38,11 +36,14 @@ func TestNewPullCommandErrors(t *testing.T) {
 		},
 	}
 	for _, tc := range testCases {
-		cli := test.NewFakeCli(&fakeClient{})
-		cmd := NewPullCommand(cli)
-		cmd.SetOut(ioutil.Discard)
-		cmd.SetArgs(tc.args)
-		assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
+		t.Run(tc.name, func(t *testing.T) {
+			cli := test.NewFakeCli(&fakeClient{})
+			cmd := newPullCommand(cli)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs(tc.args)
+			assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
+		})
 	}
 }
 
@@ -69,58 +70,21 @@ func TestNewPullCommandSuccess(t *testing.T) {
 		},
 	}
 	for _, tc := range testCases {
-		cli := test.NewFakeCli(&fakeClient{
-			imagePullFunc: func(ref string, options types.ImagePullOptions) (io.ReadCloser, error) {
-				assert.Check(t, is.Equal(tc.expectedTag, ref), tc.name)
-				return ioutil.NopCloser(strings.NewReader("")), nil
-			},
+		t.Run(tc.name, func(t *testing.T) {
+			cli := test.NewFakeCli(&fakeClient{
+				imagePullFunc: func(ref string, options client.ImagePullOptions) (client.ImagePullResponse, error) {
+					assert.Check(t, is.Equal(tc.expectedTag, ref), tc.name)
+					// FIXME(thaJeztah): how to mock this?
+					return fakeStreamResult{ReadCloser: http.NoBody}, nil
+				},
+			})
+			cmd := newPullCommand(cli)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs(tc.args)
+			err := cmd.Execute()
+			assert.NilError(t, err)
+			golden.Assert(t, cli.OutBuffer().String(), fmt.Sprintf("pull-command-success.%s.golden", tc.name))
 		})
-		cmd := NewPullCommand(cli)
-		cmd.SetOut(ioutil.Discard)
-		cmd.SetArgs(tc.args)
-		err := cmd.Execute()
-		assert.NilError(t, err)
-		golden.Assert(t, cli.OutBuffer().String(), fmt.Sprintf("pull-command-success.%s.golden", tc.name))
-	}
-}
-
-func TestNewPullCommandWithContentTrustErrors(t *testing.T) {
-	testCases := []struct {
-		name          string
-		args          []string
-		expectedError string
-		notaryFunc    test.NotaryClientFuncType
-	}{
-		{
-			name:          "offline-notary-server",
-			notaryFunc:    notary.GetOfflineNotaryRepository,
-			expectedError: "client is offline",
-			args:          []string{"image:tag"},
-		},
-		{
-			name:          "uninitialized-notary-server",
-			notaryFunc:    notary.GetUninitializedNotaryRepository,
-			expectedError: "remote trust data does not exist",
-			args:          []string{"image:tag"},
-		},
-		{
-			name:          "empty-notary-server",
-			notaryFunc:    notary.GetEmptyTargetsNotaryRepository,
-			expectedError: "No valid trust data for tag",
-			args:          []string{"image:tag"},
-		},
-	}
-	for _, tc := range testCases {
-		cli := test.NewFakeCli(&fakeClient{
-			imagePullFunc: func(ref string, options types.ImagePullOptions) (io.ReadCloser, error) {
-				return ioutil.NopCloser(strings.NewReader("")), fmt.Errorf("shouldn't try to pull image")
-			},
-		}, test.EnableContentTrust)
-		cli.SetNotaryClient(tc.notaryFunc)
-		cmd := NewPullCommand(cli)
-		cmd.SetOut(ioutil.Discard)
-		cmd.SetArgs(tc.args)
-		err := cmd.Execute()
-		assert.ErrorContains(t, err, tc.expectedError)
 	}
 }

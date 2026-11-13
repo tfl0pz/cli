@@ -3,18 +3,17 @@ package container
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"sync"
 	"time"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
-	"github.com/pkg/errors"
-	"github.com/sirupsen/logrus"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 )
 
 type stats struct {
-	mu sync.Mutex
+	mu sync.RWMutex
 	cs []*Stats
 }
 
@@ -50,41 +49,51 @@ func (s *stats) isKnownContainer(cid string) (int, bool) {
 	return -1, false
 }
 
-func collect(ctx context.Context, s *Stats, cli client.APIClient, streamStats bool, waitFirst *sync.WaitGroup) {
-	logrus.Debugf("collecting stats for %s", s.Container)
-	var (
-		getFirst       bool
-		previousCPU    uint64
-		previousSystem uint64
-		u              = make(chan error, 1)
-	)
+// snapshot returns a point-in-time copy of the tracked container list
+// (the slice of *Stats pointers). The returned slice is safe for use
+// without holding the stats lock, but the underlying Stats values may
+// continue to change concurrently.
+func (s *stats) snapshot() []*Stats {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if len(s.cs) == 0 {
+		return nil
+	}
+	// https://github.com/golang/go/issues/53643
+	cp := make([]*Stats, len(s.cs))
+	copy(cp, s.cs)
+	return cp
+}
+
+func collect(ctx context.Context, s *Stats, cli client.ContainerAPIClient, streamStats bool, waitFirst *sync.WaitGroup) { //nolint:gocyclo
+	var getFirst bool
 
 	defer func() {
-		// if error happens and we get nothing of stats, release wait group whatever
+		// if error happens, and we get nothing of stats, release wait group whatever
 		if !getFirst {
 			getFirst = true
 			waitFirst.Done()
 		}
 	}()
 
-	response, err := cli.ContainerStats(ctx, s.Container, streamStats)
+	response, err := cli.ContainerStats(ctx, s.Container, client.ContainerStatsOptions{
+		Stream:                streamStats,
+		IncludePreviousSample: !streamStats, // collect previous CPU value for the first result when not streaming.
+	})
 	if err != nil {
 		s.SetError(err)
 		return
 	}
-	defer response.Body.Close()
 
-	dec := json.NewDecoder(response.Body)
+	u := make(chan error, 1)
 	go func() {
+		defer response.Body.Close()
+		dec := json.NewDecoder(response.Body)
 		for {
-			var (
-				v                      *types.StatsJSON
-				memPercent, cpuPercent float64
-				blkRead, blkWrite      uint64 // Only used on Linux
-				mem, memLimit          float64
-				pidsStatsCurrent       uint64
-			)
-
+			if ctx.Err() != nil {
+				return
+			}
+			var v container.StatsResponse
 			if err := dec.Decode(&v); err != nil {
 				dec = json.NewDecoder(io.MultiReader(dec.Buffered(), response.Body))
 				u <- err
@@ -95,37 +104,42 @@ func collect(ctx context.Context, s *Stats, cli client.APIClient, streamStats bo
 				continue
 			}
 
-			daemonOSType = response.OSType
-
-			if daemonOSType != "windows" {
-				previousCPU = v.PreCPUStats.CPUUsage.TotalUsage
-				previousSystem = v.PreCPUStats.SystemUsage
-				cpuPercent = calculateCPUPercentUnix(previousCPU, previousSystem, v)
-				blkRead, blkWrite = calculateBlockIO(v.BlkioStats)
-				mem = calculateMemUsageUnixNoCache(v.MemoryStats)
-				memLimit = float64(v.MemoryStats.Limit)
-				memPercent = calculateMemPercentUnixNoCache(memLimit, mem)
-				pidsStatsCurrent = v.PidsStats.Current
-			} else {
-				cpuPercent = calculateCPUPercentWindows(v)
-				blkRead = v.StorageStats.ReadSizeBytes
-				blkWrite = v.StorageStats.WriteSizeBytes
-				mem = float64(v.MemoryStats.PrivateWorkingSet)
+			// Daemon versions before v29 did not return per-stats OSType;
+			// fall back to using the daemon's OSType.
+			if v.OSType == "" {
+				v.OSType = daemonOSType
 			}
-			netRx, netTx := calculateNetwork(v.Networks)
-			s.SetStatistics(StatsEntry{
-				Name:             v.Name,
-				ID:               v.ID,
-				CPUPercentage:    cpuPercent,
-				Memory:           mem,
-				MemoryPercentage: memPercent,
-				MemoryLimit:      memLimit,
-				NetworkRx:        netRx,
-				NetworkTx:        netTx,
-				BlockRead:        float64(blkRead),
-				BlockWrite:       float64(blkWrite),
-				PidsCurrent:      pidsStatsCurrent,
-			})
+
+			if daemonOSType == "windows" {
+				netRx, netTx := calculateNetwork(v.Networks)
+				s.SetStatistics(StatsEntry{
+					Name:          v.Name,
+					ID:            v.ID,
+					CPUPercentage: calculateCPUPercentWindows(&v),
+					Memory:        float64(v.MemoryStats.PrivateWorkingSet),
+					NetworkRx:     netRx,
+					NetworkTx:     netTx,
+					BlockRead:     float64(v.StorageStats.ReadSizeBytes),
+					BlockWrite:    float64(v.StorageStats.WriteSizeBytes),
+				})
+			} else {
+				memUsage := calculateMemUsageUnixNoCache(v.MemoryStats)
+				netRx, netTx := calculateNetwork(v.Networks)
+				blkRead, blkWrite := calculateBlockIO(v.BlkioStats)
+				s.SetStatistics(StatsEntry{
+					Name:             v.Name,
+					ID:               v.ID,
+					CPUPercentage:    calculateCPUPercentUnix(v.PreCPUStats, v.CPUStats),
+					Memory:           memUsage,
+					MemoryPercentage: calculateMemPercentUnixNoCache(float64(v.MemoryStats.Limit), memUsage),
+					MemoryLimit:      float64(v.MemoryStats.Limit),
+					NetworkRx:        netRx,
+					NetworkTx:        netTx,
+					BlockRead:        float64(blkRead),
+					BlockWrite:       float64(blkWrite),
+					PidsCurrent:      v.PidsStats.Current,
+				})
+			}
 			u <- nil
 			if !streamStats {
 				return
@@ -145,8 +159,8 @@ func collect(ctx context.Context, s *Stats, cli client.APIClient, streamStats bo
 			}
 		case err := <-u:
 			s.SetError(err)
-			if err == io.EOF {
-				break
+			if errors.Is(err, io.EOF) {
+				return
 			}
 			if err != nil {
 				continue
@@ -156,6 +170,9 @@ func collect(ctx context.Context, s *Stats, cli client.APIClient, streamStats bo
 				getFirst = true
 				waitFirst.Done()
 			}
+		case <-ctx.Done():
+			s.SetError(ctx.Err())
+			return
 		}
 		if !streamStats {
 			return
@@ -163,18 +180,18 @@ func collect(ctx context.Context, s *Stats, cli client.APIClient, streamStats bo
 	}
 }
 
-func calculateCPUPercentUnix(previousCPU, previousSystem uint64, v *types.StatsJSON) float64 {
+func calculateCPUPercentUnix(previousCPU container.CPUStats, curCPUStats container.CPUStats) float64 {
 	var (
 		cpuPercent = 0.0
 		// calculate the change for the cpu usage of the container in between readings
-		cpuDelta = float64(v.CPUStats.CPUUsage.TotalUsage) - float64(previousCPU)
+		cpuDelta = float64(curCPUStats.CPUUsage.TotalUsage) - float64(previousCPU.CPUUsage.TotalUsage)
 		// calculate the change for the entire system between readings
-		systemDelta = float64(v.CPUStats.SystemUsage) - float64(previousSystem)
-		onlineCPUs  = float64(v.CPUStats.OnlineCPUs)
+		systemDelta = float64(curCPUStats.SystemUsage) - float64(previousCPU.SystemUsage)
+		onlineCPUs  = float64(curCPUStats.OnlineCPUs)
 	)
 
 	if onlineCPUs == 0.0 {
-		onlineCPUs = float64(len(v.CPUStats.CPUUsage.PercpuUsage))
+		onlineCPUs = float64(len(curCPUStats.CPUUsage.PercpuUsage))
 	}
 	if systemDelta > 0.0 && cpuDelta > 0.0 {
 		cpuPercent = (cpuDelta / systemDelta) * onlineCPUs * 100.0
@@ -182,23 +199,21 @@ func calculateCPUPercentUnix(previousCPU, previousSystem uint64, v *types.StatsJ
 	return cpuPercent
 }
 
-func calculateCPUPercentWindows(v *types.StatsJSON) float64 {
+func calculateCPUPercentWindows(v *container.StatsResponse) float64 {
 	// Max number of 100ns intervals between the previous time read and now
 	possIntervals := uint64(v.Read.Sub(v.PreRead).Nanoseconds()) // Start with number of ns intervals
 	possIntervals /= 100                                         // Convert to number of 100ns intervals
-	possIntervals *= uint64(v.NumProcs)                          // Multiple by the number of processors
-
-	// Intervals used
-	intervalsUsed := v.CPUStats.CPUUsage.TotalUsage - v.PreCPUStats.CPUUsage.TotalUsage
+	possIntervals *= uint64(v.NumProcs)                          // Multiply by the number of processors
 
 	// Percentage avoiding divide-by-zero
 	if possIntervals > 0 {
+		intervalsUsed := v.CPUStats.CPUUsage.TotalUsage - v.PreCPUStats.CPUUsage.TotalUsage
 		return float64(intervalsUsed) / float64(possIntervals) * 100.0
 	}
 	return 0.00
 }
 
-func calculateBlockIO(blkio types.BlkioStats) (uint64, uint64) {
+func calculateBlockIO(blkio container.BlkioStats) (uint64, uint64) {
 	var blkRead, blkWrite uint64
 	for _, bioEntry := range blkio.IoServiceBytesRecursive {
 		if len(bioEntry.Op) == 0 {
@@ -206,15 +221,15 @@ func calculateBlockIO(blkio types.BlkioStats) (uint64, uint64) {
 		}
 		switch bioEntry.Op[0] {
 		case 'r', 'R':
-			blkRead = blkRead + bioEntry.Value
+			blkRead += bioEntry.Value
 		case 'w', 'W':
-			blkWrite = blkWrite + bioEntry.Value
+			blkWrite += bioEntry.Value
 		}
 	}
 	return blkRead, blkWrite
 }
 
-func calculateNetwork(network map[string]types.NetworkStats) (float64, float64) {
+func calculateNetwork(network map[string]container.NetworkStats) (float64, float64) {
 	var rx, tx float64
 
 	for _, v := range network {
@@ -236,7 +251,7 @@ func calculateNetwork(network map[string]types.NetworkStats) (float64, float64) 
 //
 // On Docker 19.03 and older, the result was `mem.Usage - mem.Stats["cache"]`.
 // See https://github.com/moby/moby/issues/40727 for the background.
-func calculateMemUsageUnixNoCache(mem types.MemoryStats) float64 {
+func calculateMemUsageUnixNoCache(mem container.MemoryStats) float64 {
 	// cgroup v1
 	if v, isCgroup1 := mem.Stats["total_inactive_file"]; isCgroup1 && v < mem.Usage {
 		return float64(mem.Usage - v)

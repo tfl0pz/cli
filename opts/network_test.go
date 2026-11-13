@@ -1,8 +1,10 @@
 package opts
 
 import (
+	"net/netip"
 	"testing"
 
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
@@ -24,7 +26,7 @@ func TestNetworkOptLegacySyntax(t *testing.T) {
 	for _, tc := range testCases {
 		var network NetworkOpt
 		assert.NilError(t, network.Set(tc.value))
-		assert.Check(t, is.DeepEqual(tc.expected, network.Value()))
+		assert.Check(t, is.DeepEqual(tc.expected, network.Value(), cmpopts.EquateComparable(netip.Addr{})))
 	}
 }
 
@@ -64,8 +66,8 @@ func TestNetworkOptAdvancedSyntax(t *testing.T) {
 				{
 					Target:      "docknet1",
 					Aliases:     []string{},
-					IPv4Address: "172.20.88.22",
-					IPv6Address: "2001:db8::8822",
+					IPv4Address: netip.MustParseAddr("172.20.88.22"),
+					IPv6Address: netip.MustParseAddr("2001:db8::8822"),
 				},
 			},
 		},
@@ -78,13 +80,56 @@ func TestNetworkOptAdvancedSyntax(t *testing.T) {
 				},
 			},
 		},
+		{
+			value: "name=docknet1,mac-address=52:0f:f3:dc:50:10",
+			expected: []NetworkAttachmentOpts{
+				{
+					Target:     "docknet1",
+					Aliases:    []string{},
+					MacAddress: "52:0f:f3:dc:50:10",
+				},
+			},
+		},
+		{
+			value: "name=docknet1,link-local-ip=169.254.169.254,link-local-ip=169.254.10.10",
+			expected: []NetworkAttachmentOpts{
+				{
+					Target:       "docknet1",
+					Aliases:      []string{},
+					LinkLocalIPs: []netip.Addr{netip.MustParseAddr("169.254.169.254"), netip.MustParseAddr("169.254.10.10")},
+				},
+			},
+		},
+		{
+			value: "name=docknet1,\"driver-opt=com.docker.network.endpoint.sysctls=net.ipv6.conf.IFNAME.accept_ra=2,net.ipv6.conf.IFNAME.forwarding=1\"",
+			expected: []NetworkAttachmentOpts{
+				{
+					Target:  "docknet1",
+					Aliases: []string{},
+					DriverOpts: map[string]string{
+						// The CLI converts IFNAME to ifname - it probably shouldn't, but the API
+						// allows ifname to cater for this.
+						"com.docker.network.endpoint.sysctls": "net.ipv6.conf.ifname.accept_ra=2,net.ipv6.conf.ifname.forwarding=1",
+					},
+				},
+			},
+		},
+		{
+			value: "name=docknet1,gw-priority=10",
+			expected: []NetworkAttachmentOpts{
+				{
+					Target:     "docknet1",
+					Aliases:    []string{},
+					GwPriority: 10,
+				},
+			},
+		},
 	}
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.value, func(t *testing.T) {
 			var network NetworkOpt
 			assert.NilError(t, network.Set(tc.value))
-			assert.Check(t, is.DeepEqual(tc.expected, network.Value()))
+			assert.Check(t, is.DeepEqual(tc.expected, network.Value(), cmpopts.EquateComparable(netip.Addr{})))
 		})
 	}
 }
@@ -106,12 +151,30 @@ func TestNetworkOptAdvancedSyntaxInvalid(t *testing.T) {
 			value:         "driver-opt=field1=value1,driver-opt=field2=value2",
 			expectedError: "network name/id is not specified",
 		},
+		{
+			value:         "gw-priority=invalid-integer",
+			expectedError: "invalid gw-priority (invalid-integer): invalid syntax",
+		},
 	}
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.value, func(t *testing.T) {
 			var network NetworkOpt
 			assert.ErrorContains(t, network.Set(tc.value), tc.expectedError)
 		})
 	}
+}
+
+func TestNetworkOptStringNetOptString(t *testing.T) {
+	networkOpt := &NetworkOpt{}
+	result := networkOpt.String()
+	assert.Check(t, is.Equal("", result))
+	if result != "" {
+		t.Errorf("Expected an empty string, got %s", result)
+	}
+}
+
+func TestNetworkOptTypeNetOptType(t *testing.T) {
+	networkOpt := &NetworkOpt{}
+	result := networkOpt.Type()
+	assert.Check(t, is.Equal("network", result))
 }

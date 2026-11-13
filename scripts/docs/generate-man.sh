@@ -1,17 +1,38 @@
 #!/usr/bin/env bash
-# Generate man pages for docker/cli
-set -eu -o pipefail
 
-mkdir -p ./man/man1
+set -eu
 
-if ! command -v go-md2man &> /dev/null; then
-	# yay, go install creates a binary named "v2" ¯\_(ツ)_/¯
-	go build -o "/go/bin/go-md2man" ./vendor/github.com/cpuguy83/go-md2man/v2
+: "${GO_MD2MAN:=go-md2man}"
+
+if ! command -v "$GO_MD2MAN" > /dev/null; then
+  (
+    set -x
+    # note: this installs all tools defined in go.mod/vendor.mod
+    GOBIN="$(pwd)/build/tools" go install -mod=vendor tool
+  )
+  GO_MD2MAN="$(pwd)/build/tools/go-md2man"
 fi
 
-# Generate man pages from cobra commands
-go build -o /tmp/gen-manpages github.com/docker/cli/man
-/tmp/gen-manpages --root "$(pwd)" --target "$(pwd)/man/man1"
+mkdir -p man/man1
+(
+  set -x
+  go run -mod=vendor -tags manpages ./man/generate.go --source "./man/src" --target "./man/man1"
+)
 
-# Generate legacy pages from markdown
-./man/md2man-all.sh -q
+(
+  cd man
+  for FILE in *.md; do
+    base="$(basename "$FILE")"
+    name="${base%.md}"
+    num="${name##*.}"
+    if [ -z "$num" ] || [ "$name" = "$num" ]; then
+      # skip files that aren't of the format xxxx.N.md (like README.md)
+      continue
+    fi
+    mkdir -p "./man${num}"
+    (
+      set -x ;
+      "$GO_MD2MAN" -in "$FILE" -out "./man${num}/${name}"
+    )
+  done
+)

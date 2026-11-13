@@ -2,11 +2,10 @@ package container
 
 import (
 	"io"
-	"io/ioutil"
-	"strings"
 	"testing"
 
 	"github.com/docker/cli/internal/test"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 	"gotest.tools/v3/fs"
 )
@@ -16,12 +15,13 @@ func TestContainerExportOutputToFile(t *testing.T) {
 	defer dir.Remove()
 
 	cli := test.NewFakeCli(&fakeClient{
-		containerExportFunc: func(container string) (io.ReadCloser, error) {
-			return ioutil.NopCloser(strings.NewReader("bar")), nil
+		containerExportFunc: func(container string) (client.ContainerExportResult, error) {
+			// FIXME(thaJeztah): how to mock this?
+			return mockContainerExportResult("bar"), nil
 		},
 	})
-	cmd := NewExportCommand(cli)
-	cmd.SetOut(ioutil.Discard)
+	cmd := newExportCommand(cli)
+	cmd.SetOut(io.Discard)
 	cmd.SetArgs([]string{"-o", dir.Join("foo"), "container"})
 	assert.NilError(t, cmd.Execute())
 
@@ -34,16 +34,16 @@ func TestContainerExportOutputToFile(t *testing.T) {
 
 func TestContainerExportOutputToIrregularFile(t *testing.T) {
 	cli := test.NewFakeCli(&fakeClient{
-		containerExportFunc: func(container string) (io.ReadCloser, error) {
-			return ioutil.NopCloser(strings.NewReader("foo")), nil
+		containerExportFunc: func(container string) (client.ContainerExportResult, error) {
+			// FIXME(thaJeztah): how to mock this?
+			return mockContainerExportResult("foo"), nil
 		},
 	})
-	cmd := NewExportCommand(cli)
-	cmd.SetOut(ioutil.Discard)
+	cmd := newExportCommand(cli)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
 	cmd.SetArgs([]string{"-o", "/dev/random", "container"})
 
-	err := cmd.Execute()
-	assert.Assert(t, err != nil)
-	expected := `"/dev/random" must be a directory or a regular file`
-	assert.ErrorContains(t, err, expected)
+	const expected = `failed to export container: cannot write to a character device file`
+	assert.Error(t, cmd.Execute(), expected)
 }

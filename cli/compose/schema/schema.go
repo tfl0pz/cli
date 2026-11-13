@@ -1,46 +1,61 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package schema
 
 import (
+	"bytes"
 	"embed"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
-	"github.com/pkg/errors"
-	"github.com/xeipuuv/gojsonschema"
+	"github.com/docker/go-connections/nat"
+	"github.com/santhosh-tekuri/jsonschema/v6"
+	"github.com/santhosh-tekuri/jsonschema/v6/kind"
+	"golang.org/x/text/language"
+	"golang.org/x/text/message"
 )
 
 const (
-	defaultVersion = "1.0"
+	defaultVersion = "3.13"
 	versionField   = "version"
 )
 
 type portsFormatChecker struct{}
 
-func (checker portsFormatChecker) IsFormat(input interface{}) bool {
-	// TODO: implement this
-	return true
+func (portsFormatChecker) Validate(input any) error {
+	switch input.(type) {
+	case string, json.Number,
+		int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64,
+		float32, float64:
+		_, err := nat.ParsePortSpec(fmt.Sprint(input))
+		return err
+	default:
+		// Formats only apply to supported string/number values.
+		return nil
+	}
 }
 
 type durationFormatChecker struct{}
 
-func (checker durationFormatChecker) IsFormat(input interface{}) bool {
+func (durationFormatChecker) Validate(input any) error {
 	value, ok := input.(string)
 	if !ok {
-		return false
+		return nil
 	}
 	_, err := time.ParseDuration(value)
-	return err == nil
+	return err
 }
 
-func init() {
-	gojsonschema.FormatCheckers.Add("expose", portsFormatChecker{})
-	gojsonschema.FormatCheckers.Add("ports", portsFormatChecker{})
-	gojsonschema.FormatCheckers.Add("duration", durationFormatChecker{})
-}
-
-// Version returns the version of the config, defaulting to version 1.0
-func Version(config map[string]interface{}) string {
+// Version returns the version of the config, defaulting to the latest "3.x"
+// version (3.13). If only the major version "3" is specified, it is used as
+// version "3.x" and returns the default version (latest 3.x).
+func Version(config map[string]any) string {
 	version, ok := config[versionField]
 	if !ok {
 		return defaultVersion
@@ -50,8 +65,8 @@ func Version(config map[string]interface{}) string {
 
 func normalizeVersion(version string) string {
 	switch version {
-	case "3":
-		return "3.0"
+	case "", "3":
+		return defaultVersion
 	default:
 		return version
 	}
@@ -61,50 +76,90 @@ func normalizeVersion(version string) string {
 var schemas embed.FS
 
 // Validate uses the jsonschema to validate the configuration
-func Validate(config map[string]interface{}, version string) error {
+func Validate(config map[string]any, version string) error {
+	version = normalizeVersion(version)
 	schemaData, err := schemas.ReadFile("data/config_schema_v" + version + ".json")
 	if err != nil {
-		return errors.Errorf("unsupported Compose file version: %s", version)
+		return fmt.Errorf("unsupported Compose file version: %s", version)
 	}
 
-	schemaLoader := gojsonschema.NewStringLoader(string(schemaData))
-	dataLoader := gojsonschema.NewGoLoader(config)
-
-	result, err := gojsonschema.Validate(schemaLoader, dataLoader)
+	schemaDoc, err := jsonschema.UnmarshalJSON(bytes.NewReader(schemaData))
 	if err != nil {
 		return err
 	}
 
-	if !result.Valid() {
-		return toError(result)
+	compiler := jsonschema.NewCompiler()
+	compiler.RegisterFormat(&jsonschema.Format{Name: "ports", Validate: portsFormatChecker{}.Validate})
+	compiler.RegisterFormat(&jsonschema.Format{Name: "duration", Validate: durationFormatChecker{}.Validate})
+	if err := compiler.AddResource("schema.json", schemaDoc); err != nil {
+		return err
+	}
+
+	schema, err := compiler.Compile("schema.json")
+	if err != nil {
+		return err
+	}
+
+	if err := schema.Validate(toJSONValue(config)); err != nil {
+		if validationErr, ok := errors.AsType[*jsonschema.ValidationError](err); ok {
+			return getMostSpecificError(validationErr)
+		}
+		return err
 	}
 
 	return nil
 }
 
-func toError(result *gojsonschema.Result) error {
-	err := getMostSpecificError(result.Errors())
-	return err
+func toJSONValue(v any) any {
+	if v == nil {
+		return nil
+	}
+
+	switch value := reflect.ValueOf(v); value.Kind() { //nolint: exhaustive // only need to handle maps and slices.
+	case reflect.Map:
+		result := make(map[string]any, value.Len())
+		iter := value.MapRange()
+		for iter.Next() {
+			result[iter.Key().String()] = toJSONValue(iter.Value().Interface())
+		}
+		return result
+	case reflect.Slice:
+		result := make([]any, value.Len())
+		for i := range value.Len() {
+			result[i] = toJSONValue(value.Index(i).Interface())
+		}
+		return result
+	default:
+		return v
+	}
 }
 
-const (
-	jsonschemaOneOf = "number_one_of"
-	jsonschemaAnyOf = "number_any_of"
-)
+var printer = message.NewPrinter(language.English)
 
 func getDescription(err validationError) string {
-	switch err.parent.Type() {
-	case "invalid_type":
-		if expectedType, ok := err.parent.Details()["expected"].(string); ok {
-			return fmt.Sprintf("must be a %s", humanReadableType(expectedType))
+	switch parent := err.parent.ErrorKind.(type) {
+	case *kind.Type:
+		types := make([]string, len(parent.Want))
+		for i, typ := range parent.Want {
+			types[i] = humanReadableType(typ)
 		}
-	case jsonschemaOneOf, jsonschemaAnyOf:
-		if err.child == nil {
-			return err.parent.Description()
+		return "must be " + strings.Join(types, " or ")
+	case *kind.AnyOf, *kind.OneOf:
+		if err.child != nil {
+			return getDescription(validationError{parent: err.child})
 		}
-		return err.child.Description()
+		return err.parent.ErrorKind.LocalizedString(printer)
+	case *kind.AdditionalProperties:
+		if len(parent.Properties) == 1 {
+			return fmt.Sprintf("additional property '%s' is not allowed", parent.Properties[0])
+		}
+		return err.parent.ErrorKind.LocalizedString(printer)
+	case *kind.Minimum:
+		want, _ := parent.Want.Float64()
+		return fmt.Sprintf("must be greater than or equal to %v", want)
+	default:
+		return err.parent.ErrorKind.LocalizedString(printer)
 	}
-	return err.parent.Description()
 }
 
 func humanReadableType(definition string) string {
@@ -119,56 +174,115 @@ func humanReadableType(definition string) string {
 			allTypes[len(allTypes)-1],
 		)
 	}
-	if definition == "object" {
-		return "mapping"
+	switch definition {
+	case "object":
+		return "a mapping"
+	case "array":
+		return "a list"
+	case "integer":
+		return "an integer"
+	case "null":
+		return "null"
+	default:
+		return "a " + definition
 	}
-	if definition == "array" {
-		return "list"
-	}
-	return definition
 }
 
 type validationError struct {
-	parent gojsonschema.ResultError
-	child  gojsonschema.ResultError
+	parent *jsonschema.ValidationError
+	child  *jsonschema.ValidationError
 }
 
 func (err validationError) Error() string {
-	description := getDescription(err)
-	return fmt.Sprintf("%s %s", err.parent.Field(), description)
+	validationErr := err.parent
+	if err.child != nil {
+		validationErr = err.child
+	}
+	field := strings.Join(validationErr.InstanceLocation, ".")
+	if field == "" {
+		field = "(root)"
+	}
+	return field + ": " + getDescription(err)
 }
 
-func getMostSpecificError(errors []gojsonschema.ResultError) validationError {
+func getMostSpecificError(result *jsonschema.ValidationError) validationError {
+	errs := flattenErrors(result)
 	mostSpecificError := 0
-	for i, err := range errors {
-		if specificity(err) > specificity(errors[mostSpecificError]) {
+	for i, err := range errs {
+		if specificity(err) > specificity(errs[mostSpecificError]) {
 			mostSpecificError = i
 			continue
 		}
 
-		if specificity(err) == specificity(errors[mostSpecificError]) {
-			// Invalid type errors win in a tie-breaker for most specific field name
-			if err.Type() == "invalid_type" && errors[mostSpecificError].Type() != "invalid_type" {
+		if specificity(err) == specificity(errs[mostSpecificError]) {
+			// Invalid type errors win in a tie-breaker for most specific field name.
+			if isTypeError(err) && !isTypeError(errs[mostSpecificError]) {
 				mostSpecificError = i
 			}
 		}
 	}
 
-	if mostSpecificError+1 == len(errors) {
-		return validationError{parent: errors[mostSpecificError]}
+	err := validationError{parent: errs[mostSpecificError]}
+	switch err.parent.ErrorKind.(type) {
+	case *kind.OneOf, *kind.AnyOf:
+		err.child = mostSpecificCause(err.parent)
 	}
-
-	switch errors[mostSpecificError].Type() {
-	case "number_one_of", "number_any_of":
-		return validationError{
-			parent: errors[mostSpecificError],
-			child:  errors[mostSpecificError+1],
-		}
-	default:
-		return validationError{parent: errors[mostSpecificError]}
-	}
+	return err
 }
 
-func specificity(err gojsonschema.ResultError) int {
-	return len(strings.Split(err.Field(), "."))
+func mostSpecificCause(err *jsonschema.ValidationError) *jsonschema.ValidationError {
+	var best *jsonschema.ValidationError
+
+	for _, cause := range err.Causes {
+		for _, candidate := range flattenErrors(cause) {
+			switch candidate.ErrorKind.(type) {
+			case *kind.OneOf, *kind.AnyOf:
+				if nested := mostSpecificCause(candidate); nested != nil {
+					candidate = nested
+				}
+			}
+
+			if best == nil || specificity(candidate) > specificity(best) {
+				best = candidate
+				continue
+			}
+
+			if specificity(candidate) == specificity(best) {
+				// Within oneOf/anyOf, an error from an alternative whose
+				// type matched is more useful than a type mismatch from
+				// another alternative.
+				if !isTypeError(candidate) && isTypeError(best) {
+					best = candidate
+				}
+			}
+		}
+	}
+
+	return best
+}
+
+func flattenErrors(err *jsonschema.ValidationError) []*jsonschema.ValidationError {
+	var errs []*jsonschema.ValidationError
+	var walk func(*jsonschema.ValidationError)
+	walk = func(err *jsonschema.ValidationError) {
+		switch err.ErrorKind.(type) {
+		case *kind.Schema, *kind.Group, *kind.Reference:
+			for _, cause := range err.Causes {
+				walk(cause)
+			}
+		default:
+			errs = append(errs, err)
+		}
+	}
+	walk(err)
+	return errs
+}
+
+func isTypeError(err *jsonschema.ValidationError) bool {
+	_, ok := err.ErrorKind.(*kind.Type)
+	return ok
+}
+
+func specificity(err *jsonschema.ValidationError) int {
+	return len(err.InstanceLocation)
 }

@@ -1,15 +1,16 @@
 package swarm
 
 import (
-	"io/ioutil"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/docker/cli/cli/streams"
 	"github.com/docker/cli/internal/test"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/pkg/errors"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/api/types/system"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 )
 
@@ -17,8 +18,8 @@ func TestSwarmUnlockErrors(t *testing.T) {
 	testCases := []struct {
 		name            string
 		args            []string
-		swarmUnlockFunc func(req swarm.UnlockRequest) error
-		infoFunc        func() (types.Info, error)
+		swarmUnlockFunc func(client.SwarmUnlockOptions) (client.SwarmUnlockResult, error)
+		infoFunc        func() (system.Info, error)
 		expectedError   string
 	}{
 		{
@@ -28,71 +29,81 @@ func TestSwarmUnlockErrors(t *testing.T) {
 		},
 		{
 			name: "is-not-part-of-a-swarm",
-			infoFunc: func() (types.Info, error) {
-				return types.Info{
+			infoFunc: func() (system.Info, error) {
+				return system.Info{
 					Swarm: swarm.Info{
 						LocalNodeState: swarm.LocalNodeStateInactive,
 					},
 				}, nil
 			},
-			expectedError: "This node is not part of a swarm",
+			expectedError: "this node is not part of a swarm",
 		},
 		{
 			name: "is-not-locked",
-			infoFunc: func() (types.Info, error) {
-				return types.Info{
+			infoFunc: func() (system.Info, error) {
+				return system.Info{
 					Swarm: swarm.Info{
 						LocalNodeState: swarm.LocalNodeStateActive,
 					},
 				}, nil
 			},
-			expectedError: "Error: swarm is not locked",
+			expectedError: "error: swarm is not locked",
 		},
 		{
 			name: "unlockrequest-failed",
-			infoFunc: func() (types.Info, error) {
-				return types.Info{
+			infoFunc: func() (system.Info, error) {
+				return system.Info{
 					Swarm: swarm.Info{
 						LocalNodeState: swarm.LocalNodeStateLocked,
 					},
 				}, nil
 			},
-			swarmUnlockFunc: func(req swarm.UnlockRequest) error {
-				return errors.Errorf("error unlocking the swarm")
+			swarmUnlockFunc: func(client.SwarmUnlockOptions) (client.SwarmUnlockResult, error) {
+				return client.SwarmUnlockResult{}, errors.New("error unlocking the swarm")
 			},
 			expectedError: "error unlocking the swarm",
 		},
 	}
 	for _, tc := range testCases {
-		cmd := newUnlockCommand(
-			test.NewFakeCli(&fakeClient{
-				infoFunc:        tc.infoFunc,
-				swarmUnlockFunc: tc.swarmUnlockFunc,
-			}))
-		cmd.SetArgs(tc.args)
-		cmd.SetOut(ioutil.Discard)
-		assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newUnlockCommand(
+				test.NewFakeCli(&fakeClient{
+					infoFunc:        tc.infoFunc,
+					swarmUnlockFunc: tc.swarmUnlockFunc,
+				}))
+			if tc.args == nil {
+				cmd.SetArgs([]string{})
+			} else {
+				cmd.SetArgs(tc.args)
+			}
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
+		})
 	}
 }
 
 func TestSwarmUnlock(t *testing.T) {
 	input := "unlockKey"
 	dockerCli := test.NewFakeCli(&fakeClient{
-		infoFunc: func() (types.Info, error) {
-			return types.Info{
+		infoFunc: func() (system.Info, error) {
+			return system.Info{
 				Swarm: swarm.Info{
 					LocalNodeState: swarm.LocalNodeStateLocked,
 				},
 			}, nil
 		},
-		swarmUnlockFunc: func(req swarm.UnlockRequest) error {
-			if req.UnlockKey != input {
-				return errors.Errorf("Invalid unlock key")
+		swarmUnlockFunc: func(req client.SwarmUnlockOptions) (client.SwarmUnlockResult, error) {
+			if req.Key != input {
+				return client.SwarmUnlockResult{}, errors.New("invalid unlock key")
 			}
-			return nil
+			return client.SwarmUnlockResult{}, nil
 		},
 	})
-	dockerCli.SetIn(streams.NewIn(ioutil.NopCloser(strings.NewReader(input))))
+	dockerCli.SetIn(streams.NewIn(io.NopCloser(strings.NewReader(input))))
 	cmd := newUnlockCommand(dockerCli)
+	cmd.SetArgs([]string{})
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
 	assert.NilError(t, cmd.Execute())
 }

@@ -1,15 +1,19 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package secret
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/formatter"
 	"github.com/docker/cli/cli/command/inspect"
-	"github.com/docker/docker/api/types/swarm"
-	units "github.com/docker/go-units"
+	"github.com/docker/go-units"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 )
 
 const (
@@ -29,8 +33,8 @@ Created at:        {{.CreatedAt}}
 Updated at:        {{.UpdatedAt}}`
 )
 
-// NewFormat returns a Format for rendering using a secret Context
-func NewFormat(source string, quiet bool) formatter.Format {
+// newFormat returns a Format for rendering using a secretContext.
+func newFormat(source string, quiet bool) formatter.Format {
 	switch source {
 	case formatter.PrettyFormatKey:
 		return secretInspectPrettyTemplate
@@ -43,32 +47,29 @@ func NewFormat(source string, quiet bool) formatter.Format {
 	return formatter.Format(source)
 }
 
-// FormatWrite writes the context
-func FormatWrite(ctx formatter.Context, secrets []swarm.Secret) error {
-	render := func(format func(subContext formatter.SubContext) error) error {
-		for _, secret := range secrets {
+// formatWrite writes the context
+func formatWrite(fmtCtx formatter.Context, secrets client.SecretListResult) error {
+	sCtx := &secretContext{
+		HeaderContext: formatter.HeaderContext{
+			Header: formatter.SubHeaderContext{
+				"ID":        secretIDHeader,
+				"Name":      formatter.NameHeader,
+				"Driver":    formatter.DriverHeader,
+				"CreatedAt": secretCreatedHeader,
+				"UpdatedAt": secretUpdatedHeader,
+				"Labels":    formatter.LabelsHeader,
+			},
+		},
+	}
+	return fmtCtx.Write(sCtx, func(format func(subContext formatter.SubContext) error) error {
+		for _, secret := range secrets.Items {
 			secretCtx := &secretContext{s: secret}
 			if err := format(secretCtx); err != nil {
 				return err
 			}
 		}
 		return nil
-	}
-	return ctx.Write(newSecretContext(), render)
-}
-
-func newSecretContext() *secretContext {
-	sCtx := &secretContext{}
-
-	sCtx.Header = formatter.SubHeaderContext{
-		"ID":        secretIDHeader,
-		"Name":      formatter.NameHeader,
-		"Driver":    formatter.DriverHeader,
-		"CreatedAt": secretCreatedHeader,
-		"UpdatedAt": secretUpdatedHeader,
-		"Labels":    formatter.LabelsHeader,
-	}
-	return sCtx
+	})
 }
 
 type secretContext struct {
@@ -108,10 +109,11 @@ func (c *secretContext) Labels() string {
 	if mapLabels == nil {
 		return ""
 	}
-	var joinLabels []string
+	joinLabels := make([]string, 0, len(mapLabels))
 	for k, v := range mapLabels {
-		joinLabels = append(joinLabels, fmt.Sprintf("%s=%s", k, v))
+		joinLabels = append(joinLabels, k+"="+v)
 	}
+	slices.Sort(joinLabels)
 	return strings.Join(joinLabels, ",")
 }
 
@@ -122,12 +124,12 @@ func (c *secretContext) Label(name string) string {
 	return c.s.Spec.Annotations.Labels[name]
 }
 
-// InspectFormatWrite renders the context for a list of secrets
-func InspectFormatWrite(ctx formatter.Context, refs []string, getRef inspect.GetRefFunc) error {
-	if ctx.Format != secretInspectPrettyTemplate {
-		return inspect.Inspect(ctx.Output, refs, string(ctx.Format), getRef)
+// inspectFormatWrite renders the context for a list of secrets.
+func inspectFormatWrite(fmtCtx formatter.Context, refs []string, getRef inspect.GetRefFunc) error {
+	if fmtCtx.Format != secretInspectPrettyTemplate {
+		return inspect.Inspect(fmtCtx.Output, refs, string(fmtCtx.Format), getRef)
 	}
-	render := func(format func(subContext formatter.SubContext) error) error {
+	return fmtCtx.Write(&secretInspectContext{}, func(format func(subContext formatter.SubContext) error) error {
 		for _, ref := range refs {
 			secretI, _, err := getRef(ref)
 			if err != nil {
@@ -142,8 +144,7 @@ func InspectFormatWrite(ctx formatter.Context, refs []string, getRef inspect.Get
 			}
 		}
 		return nil
-	}
-	return ctx.Write(&secretInspectContext{}, render)
+	})
 }
 
 type secretInspectContext struct {
@@ -171,9 +172,9 @@ func (ctx *secretInspectContext) Driver() string {
 }
 
 func (ctx *secretInspectContext) CreatedAt() string {
-	return command.PrettyPrint(ctx.Secret.CreatedAt)
+	return formatter.PrettyPrint(ctx.Secret.CreatedAt)
 }
 
 func (ctx *secretInspectContext) UpdatedAt() string {
-	return command.PrettyPrint(ctx.Secret.UpdatedAt)
+	return formatter.PrettyPrint(ctx.Secret.UpdatedAt)
 }

@@ -1,30 +1,26 @@
----
-title: "node rm"
-description: "The node rm command description and usage"
-keywords: "node, remove"
----
-
 # node rm
 
-```markdown
-Usage:  docker node rm [OPTIONS] NODE [NODE...]
-
+<!---MARKER_GEN_START-->
 Remove one or more nodes from the swarm
 
-Aliases:
-  rm, remove
+### Aliases
 
-Options:
-  -f, --force   Force remove a node from the swarm
-      --help    Print usage
-```
+`docker node rm`, `docker node remove`
+
+### Options
+
+| Name                                | Type   | Default | Description                        |
+|:------------------------------------|:-------|:--------|:-----------------------------------|
+| [`-f`](#force), [`--force`](#force) | `bool` |         | Force remove a node from the swarm |
+
+
+<!---MARKER_GEN_END-->
 
 ## Description
 
 Removes the specified nodes from a swarm.
 
-> **Note**
->
+> [!NOTE]
 > This is a cluster management command, and must be executed on a swarm
 > manager node. To learn about managers and workers, refer to the
 > [Swarm mode section](https://docs.docker.com/engine/swarm/) in the
@@ -45,14 +41,14 @@ Node swarm-node-02 removed from swarm
 Removes the specified nodes from the swarm, but only if the nodes are in the
 down state. If you attempt to remove an active node you will receive an error:
 
-```non
+```console
 $ docker node rm swarm-node-03
 
 Error response from daemon: rpc error: code = 9 desc = node swarm-node-03 is not
 down and can't be removed
 ```
 
-### Forcibly remove an inaccessible node from a swarm
+### <a name="force"></a> Forcibly remove an inaccessible node from a swarm (--force)
 
 If you lose access to a worker node or need to shut it down because it has been
 compromised or is not behaving as expected, you can use the `--force` option.

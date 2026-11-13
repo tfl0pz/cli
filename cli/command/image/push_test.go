@@ -1,14 +1,18 @@
 package image
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
 	"io"
-	"io/ioutil"
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/docker/cli/internal/test"
-	"github.com/docker/docker/api/types"
-	"github.com/pkg/errors"
+	"github.com/moby/moby/api/types/auxprogress"
+	"github.com/moby/moby/client"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"gotest.tools/v3/assert"
 )
 
@@ -17,33 +21,36 @@ func TestNewPushCommandErrors(t *testing.T) {
 		name          string
 		args          []string
 		expectedError string
-		imagePushFunc func(ref string, options types.ImagePushOptions) (io.ReadCloser, error)
+		imagePushFunc func(ref string, options client.ImagePushOptions) (client.ImagePushResponse, error)
 	}{
 		{
 			name:          "wrong-args",
 			args:          []string{},
-			expectedError: "requires exactly 1 argument.",
+			expectedError: "requires 1 argument",
 		},
 		{
 			name:          "invalid-name",
 			args:          []string{"UPPERCASE_REPO"},
-			expectedError: "invalid reference format: repository name must be lowercase",
+			expectedError: "invalid reference format: repository name (library/UPPERCASE_REPO) must be lowercase",
 		},
 		{
 			name:          "push-failed",
 			args:          []string{"image:repo"},
-			expectedError: "Failed to push",
-			imagePushFunc: func(ref string, options types.ImagePushOptions) (io.ReadCloser, error) {
-				return ioutil.NopCloser(strings.NewReader("")), errors.Errorf("Failed to push")
+			expectedError: "failed to push",
+			imagePushFunc: func(ref string, options client.ImagePushOptions) (client.ImagePushResponse, error) {
+				return nil, errors.New("failed to push")
 			},
 		},
 	}
 	for _, tc := range testCases {
-		cli := test.NewFakeCli(&fakeClient{imagePushFunc: tc.imagePushFunc})
-		cmd := NewPushCommand(cli)
-		cmd.SetOut(ioutil.Discard)
-		cmd.SetArgs(tc.args)
-		assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
+		t.Run(tc.name, func(t *testing.T) {
+			cli := test.NewFakeCli(&fakeClient{imagePushFunc: tc.imagePushFunc})
+			cmd := newPushCommand(cli)
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs(tc.args)
+			assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
+		})
 	}
 }
 
@@ -64,16 +71,18 @@ func TestNewPushCommandSuccess(t *testing.T) {
 `,
 		},
 	}
+
 	for _, tc := range testCases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			cli := test.NewFakeCli(&fakeClient{
-				imagePushFunc: func(ref string, options types.ImagePushOptions) (io.ReadCloser, error) {
-					return ioutil.NopCloser(strings.NewReader("")), nil
+				imagePushFunc: func(ref string, options client.ImagePushOptions) (client.ImagePushResponse, error) {
+					// FIXME(thaJeztah): how to mock this?
+					return fakeStreamResult{ReadCloser: http.NoBody}, nil
 				},
 			})
-			cmd := NewPushCommand(cli)
+			cmd := newPushCommand(cli)
 			cmd.SetOut(cli.OutBuffer())
+			cmd.SetErr(io.Discard)
 			cmd.SetArgs(tc.args)
 			assert.NilError(t, cmd.Execute())
 			if tc.output != "" {
@@ -81,4 +90,31 @@ func TestNewPushCommandSuccess(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunPushRespectsNoColorForAuxNotes(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	cli := test.NewFakeCli(&fakeClient{
+		imagePushFunc: func(ref string, options client.ImagePushOptions) (client.ImagePushResponse, error) {
+			aux, err := json.Marshal(auxprogress.ManifestPushedInsteadOfIndex{
+				ManifestPushedInsteadOfIndex: true,
+				OriginalIndex:                ocispec.Descriptor{Digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"},
+				SelectedManifest:             ocispec.Descriptor{Digest: "sha256:2222222222222222222222222222222222222222222222222222222222222222"},
+			})
+			assert.NilError(t, err)
+			var buf bytes.Buffer
+			buf.WriteString(`{"aux":`)
+			buf.Write(aux)
+			buf.WriteString("}\n")
+			return fakeStreamResult{ReadCloser: io.NopCloser(&buf)}, nil
+		},
+	})
+	cli.Out().SetIsTerminal(true)
+
+	err := runPush(t.Context(), cli, pushOptions{remote: "image:tag"})
+	assert.NilError(t, err)
+
+	out := cli.OutBuffer().String()
+	assert.Assert(t, strings.Contains(out, "sha256:1111111111111111111111111111111111111111111111111111111111111111 -> sha256:2222222222222222222222222222222222222222222222222222222222222222"))
+	assert.Assert(t, !strings.Contains(out, "\x1b["), "output should not contain ANSI escape codes, output: %s", out)
 }

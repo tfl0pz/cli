@@ -1,24 +1,26 @@
 package container
 
 import (
+	"context"
+	"errors"
 	"io"
-	"io/ioutil"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/docker/cli/internal/test"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/pkg/archive"
+	"github.com/moby/go-archive"
+	"github.com/moby/go-archive/compression"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/fs"
-	"gotest.tools/v3/skip"
 )
 
 func TestRunCopyWithInvalidArguments(t *testing.T) {
-	var testcases = []struct {
+	testcases := []struct {
 		doc         string
 		options     copyOptions
 		expectedErr string
@@ -42,7 +44,7 @@ func TestRunCopyWithInvalidArguments(t *testing.T) {
 	}
 	for _, testcase := range testcases {
 		t.Run(testcase.doc, func(t *testing.T) {
-			err := runCopy(test.NewFakeCli(nil), testcase.options)
+			err := runCopy(context.TODO(), test.NewFakeCli(nil), testcase.options)
 			assert.Error(t, err, testcase.expectedErr)
 		})
 	}
@@ -51,40 +53,48 @@ func TestRunCopyWithInvalidArguments(t *testing.T) {
 func TestRunCopyFromContainerToStdout(t *testing.T) {
 	tarContent := "the tar content"
 
-	fakeClient := &fakeClient{
-		containerCopyFromFunc: func(container, srcPath string) (io.ReadCloser, types.ContainerPathStat, error) {
-			assert.Check(t, is.Equal("container", container))
-			return ioutil.NopCloser(strings.NewReader(tarContent)), types.ContainerPathStat{}, nil
+	cli := test.NewFakeCli(&fakeClient{
+		containerCopyFromFunc: func(ctr, srcPath string) (client.CopyFromContainerResult, error) {
+			assert.Check(t, is.Equal("container", ctr))
+			return client.CopyFromContainerResult{
+				Content: io.NopCloser(strings.NewReader(tarContent)),
+			}, nil
 		},
-	}
-	options := copyOptions{source: "container:/path", destination: "-"}
-	cli := test.NewFakeCli(fakeClient)
-	err := runCopy(cli, options)
+	})
+	err := runCopy(context.TODO(), cli, copyOptions{
+		source:      "container:/path",
+		destination: "-",
+	})
 	assert.NilError(t, err)
 	assert.Check(t, is.Equal(tarContent, cli.OutBuffer().String()))
 	assert.Check(t, is.Equal("", cli.ErrBuffer().String()))
 }
 
 func TestRunCopyFromContainerToFilesystem(t *testing.T) {
-	destDir := fs.NewDir(t, "cp-test",
+	srcDir := fs.NewDir(t, "cp-test",
 		fs.WithFile("file1", "content\n"))
-	defer destDir.Remove()
 
-	fakeClient := &fakeClient{
-		containerCopyFromFunc: func(container, srcPath string) (io.ReadCloser, types.ContainerPathStat, error) {
-			assert.Check(t, is.Equal("container", container))
-			readCloser, err := archive.TarWithOptions(destDir.Path(), &archive.TarOptions{})
-			return readCloser, types.ContainerPathStat{}, err
+	destDir := fs.NewDir(t, "cp-test")
+
+	cli := test.NewFakeCli(&fakeClient{
+		containerCopyFromFunc: func(ctr, srcPath string) (client.CopyFromContainerResult, error) {
+			assert.Check(t, is.Equal("container", ctr))
+			readCloser, err := archive.Tar(srcDir.Path(), compression.None)
+			return client.CopyFromContainerResult{
+				Content: readCloser,
+			}, err
 		},
-	}
-	options := copyOptions{source: "container:/path", destination: destDir.Path(), quiet: true}
-	cli := test.NewFakeCli(fakeClient)
-	err := runCopy(cli, options)
+	})
+	err := runCopy(context.TODO(), cli, copyOptions{
+		source:      "container:/path",
+		destination: destDir.Path(),
+		quiet:       true,
+	})
 	assert.NilError(t, err)
 	assert.Check(t, is.Equal("", cli.OutBuffer().String()))
 	assert.Check(t, is.Equal("", cli.ErrBuffer().String()))
 
-	content, err := ioutil.ReadFile(destDir.Join("file1"))
+	content, err := os.ReadFile(destDir.Join("file1"))
 	assert.NilError(t, err)
 	assert.Check(t, is.Equal("content\n", string(content)))
 }
@@ -94,20 +104,19 @@ func TestRunCopyFromContainerToFilesystemMissingDestinationDirectory(t *testing.
 		fs.WithFile("file1", "content\n"))
 	defer destDir.Remove()
 
-	fakeClient := &fakeClient{
-		containerCopyFromFunc: func(container, srcPath string) (io.ReadCloser, types.ContainerPathStat, error) {
-			assert.Check(t, is.Equal("container", container))
+	cli := test.NewFakeCli(&fakeClient{
+		containerCopyFromFunc: func(ctr, srcPath string) (client.CopyFromContainerResult, error) {
+			assert.Check(t, is.Equal("container", ctr))
 			readCloser, err := archive.TarWithOptions(destDir.Path(), &archive.TarOptions{})
-			return readCloser, types.ContainerPathStat{}, err
+			return client.CopyFromContainerResult{
+				Content: readCloser,
+			}, err
 		},
-	}
-
-	options := copyOptions{
+	})
+	err := runCopy(context.TODO(), cli, copyOptions{
 		source:      "container:/path",
 		destination: destDir.Join("missing", "foo"),
-	}
-	cli := test.NewFakeCli(fakeClient)
-	err := runCopy(cli, options)
+	})
 	assert.ErrorContains(t, err, destDir.Join("missing"))
 }
 
@@ -115,12 +124,11 @@ func TestRunCopyToContainerFromFileWithTrailingSlash(t *testing.T) {
 	srcFile := fs.NewFile(t, t.Name())
 	defer srcFile.Remove()
 
-	options := copyOptions{
+	cli := test.NewFakeCli(&fakeClient{})
+	err := runCopy(context.TODO(), cli, copyOptions{
 		source:      srcFile.Path() + string(os.PathSeparator),
 		destination: "container:/path",
-	}
-	cli := test.NewFakeCli(&fakeClient{})
-	err := runCopy(cli, options)
+	})
 
 	expectedError := "not a directory"
 	if runtime.GOOS == "windows" {
@@ -130,12 +138,11 @@ func TestRunCopyToContainerFromFileWithTrailingSlash(t *testing.T) {
 }
 
 func TestRunCopyToContainerSourceDoesNotExist(t *testing.T) {
-	options := copyOptions{
+	cli := test.NewFakeCli(&fakeClient{})
+	err := runCopy(context.TODO(), cli, copyOptions{
 		source:      "/does/not/exist",
 		destination: "container:/path",
-	}
-	cli := test.NewFakeCli(&fakeClient{})
-	err := runCopy(cli, options)
+	})
 	expected := "no such file or directory"
 	if runtime.GOOS == "windows" {
 		expected = "cannot find the file specified"
@@ -144,7 +151,7 @@ func TestRunCopyToContainerSourceDoesNotExist(t *testing.T) {
 }
 
 func TestSplitCpArg(t *testing.T) {
-	var testcases = []struct {
+	testcases := []struct {
 		doc               string
 		path              string
 		os                string
@@ -153,7 +160,7 @@ func TestSplitCpArg(t *testing.T) {
 	}{
 		{
 			doc:          "absolute path with colon",
-			os:           "linux",
+			os:           "unix",
 			path:         "/abs/path:withcolon",
 			expectedPath: "/abs/path:withcolon",
 		},
@@ -180,22 +187,324 @@ func TestSplitCpArg(t *testing.T) {
 			expectedContainer: "container",
 		},
 	}
-	for _, testcase := range testcases {
-		t.Run(testcase.doc, func(t *testing.T) {
-			skip.If(t, testcase.os != "" && testcase.os != runtime.GOOS)
+	for _, tc := range testcases {
+		t.Run(tc.doc, func(t *testing.T) {
+			if tc.os == "windows" && runtime.GOOS != "windows" {
+				t.Skip("skipping windows test on non-windows platform")
+			}
+			if tc.os == "unix" && runtime.GOOS == "windows" {
+				t.Skip("skipping unix test on windows")
+			}
 
-			container, path := splitCpArg(testcase.path)
-			assert.Check(t, is.Equal(testcase.expectedContainer, container))
-			assert.Check(t, is.Equal(testcase.expectedPath, path))
+			ctr, path := splitCpArg(tc.path)
+			assert.Check(t, is.Equal(tc.expectedContainer, ctr))
+			assert.Check(t, is.Equal(tc.expectedPath, path))
 		})
 	}
 }
 
 func TestRunCopyFromContainerToFilesystemIrregularDestination(t *testing.T) {
-	options := copyOptions{source: "container:/dev/null", destination: "/dev/random"}
 	cli := test.NewFakeCli(nil)
-	err := runCopy(cli, options)
+	err := runCopy(context.TODO(), cli, copyOptions{
+		source:      "container:/dev/null",
+		destination: "/dev/random",
+	})
 	assert.Assert(t, err != nil)
 	expected := `"/dev/random" must be a directory or a regular file`
 	assert.ErrorContains(t, err, expected)
+}
+
+func TestCopySummary(t *testing.T) {
+	tests := []struct {
+		name            string
+		contentSize     int64
+		transferredSize int64
+		dest            string
+		wantContains    string
+		wantNoContain   string
+	}{
+		{
+			name:            "different sizes shows both",
+			contentSize:     5,
+			transferredSize: 2048,
+			dest:            "/dst",
+			wantContains:    "(transferred",
+		},
+		{
+			name:            "equal sizes shows single value",
+			contentSize:     100,
+			transferredSize: 100,
+			dest:            "/dst",
+			wantNoContain:   "(transferred",
+		},
+		{
+			name:            "both zero",
+			contentSize:     0,
+			transferredSize: 0,
+			dest:            "ctr:/dst",
+			wantContains:    "Successfully copied 0B to ctr:/dst",
+			wantNoContain:   "(transferred",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := copySummary(tc.contentSize, tc.transferredSize, tc.dest)
+			if tc.wantContains != "" {
+				assert.Check(t, is.Contains(got, tc.wantContains))
+			}
+			if tc.wantNoContain != "" {
+				assert.Check(t, !strings.Contains(got, tc.wantNoContain), "unexpected substring %q in %q", tc.wantNoContain, got)
+			}
+		})
+	}
+}
+
+func TestCopyFromContainerReportsFileSize(t *testing.T) {
+	// The file content is "hello" (5 bytes), but the TAR archive wrapping
+	// it is much larger due to headers and padding. The success message
+	// should report the actual file size (5B), not the TAR stream size.
+	srcDir := fs.NewDir(t, "cp-test-from",
+		fs.WithFile("file1", "hello"))
+
+	destDir := fs.NewDir(t, "cp-test-from-dest")
+
+	const fileSize int64 = 5
+	fakeCli := test.NewFakeCli(&fakeClient{
+		containerCopyFromFunc: func(ctr, srcPath string) (client.CopyFromContainerResult, error) {
+			readCloser, err := archive.Tar(srcDir.Path(), compression.None)
+			return client.CopyFromContainerResult{
+				Content: readCloser,
+				Stat: container.PathStat{
+					Name: "file1",
+					Size: fileSize,
+				},
+			}, err
+		},
+	})
+	err := runCopy(context.TODO(), fakeCli, copyOptions{
+		source:      "container:/file1",
+		destination: destDir.Path(),
+	})
+	assert.NilError(t, err)
+	errOut := fakeCli.ErrBuffer().String()
+	assert.Check(t, is.Contains(errOut, "Successfully copied 5B"))
+	assert.Check(t, is.Contains(errOut, "(transferred"))
+}
+
+func TestCopyToContainerReportsFileSize(t *testing.T) {
+	// Create a temp file with known content ("hello" = 5 bytes).
+	// The TAR archive sent to the container is larger, but the success
+	// message should report the actual content size.
+	srcFile := fs.NewFile(t, "cp-test-to", fs.WithContent("hello"))
+
+	fakeCli := test.NewFakeCli(&fakeClient{
+		containerStatPathFunc: func(containerID, path string) (client.ContainerStatPathResult, error) {
+			return client.ContainerStatPathResult{
+				Stat: container.PathStat{
+					Name: "tmp",
+					Mode: os.ModeDir | 0o755,
+				},
+			}, nil
+		},
+		containerCopyToFunc: func(containerID string, options client.CopyToContainerOptions) (client.CopyToContainerResult, error) {
+			_, _ = io.Copy(io.Discard, options.Content)
+			return client.CopyToContainerResult{}, nil
+		},
+	})
+	err := runCopy(context.TODO(), fakeCli, copyOptions{
+		source:      srcFile.Path(),
+		destination: "container:/tmp",
+	})
+	assert.NilError(t, err)
+	errOut := fakeCli.ErrBuffer().String()
+	assert.Check(t, is.Contains(errOut, "Successfully copied 5B"))
+	assert.Check(t, is.Contains(errOut, "(transferred"))
+}
+
+func TestCopyToContainerReportsEmptyFileSize(t *testing.T) {
+	srcFile := fs.NewFile(t, "cp-test-empty", fs.WithContent(""))
+
+	fakeCli := test.NewFakeCli(&fakeClient{
+		containerStatPathFunc: func(containerID, path string) (client.ContainerStatPathResult, error) {
+			return client.ContainerStatPathResult{
+				Stat: container.PathStat{
+					Name: "tmp",
+					Mode: os.ModeDir | 0o755,
+				},
+			}, nil
+		},
+		containerCopyToFunc: func(containerID string, options client.CopyToContainerOptions) (client.CopyToContainerResult, error) {
+			_, _ = io.Copy(io.Discard, options.Content)
+			return client.CopyToContainerResult{}, nil
+		},
+	})
+	err := runCopy(context.TODO(), fakeCli, copyOptions{
+		source:      srcFile.Path(),
+		destination: "container:/tmp",
+	})
+	assert.NilError(t, err)
+	errOut := fakeCli.ErrBuffer().String()
+	assert.Check(t, is.Contains(errOut, "Successfully copied 0B"))
+	assert.Check(t, is.Contains(errOut, "(transferred"))
+}
+
+func TestCopyToContainerReportsDirectorySize(t *testing.T) {
+	// Create a temp directory with files "aaa" (3 bytes) + "bbb" (3 bytes) = 6 bytes.
+	// The TAR archive is much larger, but the success message should report 6B.
+	srcDir := fs.NewDir(t, "cp-test-dir",
+		fs.WithFile("aaa", "aaa"),
+		fs.WithFile("bbb", "bbb"),
+	)
+
+	fakeCli := test.NewFakeCli(&fakeClient{
+		containerStatPathFunc: func(containerID, path string) (client.ContainerStatPathResult, error) {
+			return client.ContainerStatPathResult{
+				Stat: container.PathStat{
+					Name: "tmp",
+					Mode: os.ModeDir | 0o755,
+				},
+			}, nil
+		},
+		containerCopyToFunc: func(containerID string, options client.CopyToContainerOptions) (client.CopyToContainerResult, error) {
+			_, _ = io.Copy(io.Discard, options.Content)
+			return client.CopyToContainerResult{}, nil
+		},
+	})
+	err := runCopy(context.TODO(), fakeCli, copyOptions{
+		source:      srcDir.Path() + string(os.PathSeparator),
+		destination: "container:/tmp",
+	})
+	assert.NilError(t, err)
+	errOut := fakeCli.ErrBuffer().String()
+	assert.Check(t, is.Contains(errOut, "Successfully copied 6B"))
+	assert.Check(t, is.Contains(errOut, "(transferred"))
+}
+
+func TestCopyFromContainerReportsDirectorySize(t *testing.T) {
+	// When copying a directory from a container, cpRes.Stat.Mode.IsDir() is true,
+	// so reportedSize falls back to copiedSize (the tar stream bytes).
+	srcDir := fs.NewDir(t, "cp-test-fromdir",
+		fs.WithFile("file1", "hello"))
+
+	destDir := fs.NewDir(t, "cp-test-fromdir-dest")
+
+	fakeCli := test.NewFakeCli(&fakeClient{
+		containerCopyFromFunc: func(ctr, srcPath string) (client.CopyFromContainerResult, error) {
+			readCloser, err := archive.Tar(srcDir.Path(), compression.None)
+			return client.CopyFromContainerResult{
+				Content: readCloser,
+				Stat: container.PathStat{
+					Name: "mydir",
+					Mode: os.ModeDir | 0o755,
+				},
+			}, err
+		},
+	})
+	err := runCopy(context.TODO(), fakeCli, copyOptions{
+		source:      "container:/mydir",
+		destination: destDir.Path(),
+	})
+	assert.NilError(t, err)
+	errOut := fakeCli.ErrBuffer().String()
+	assert.Check(t, is.Contains(errOut, "Successfully copied"))
+	// For directories from container, content size is unknown so
+	// reportedSize == copiedSize and "(transferred ...)" is omitted.
+	assert.Check(t, !strings.Contains(errOut, "(transferred"))
+}
+
+func TestCopyToContainerStdinReportsTransferredSize(t *testing.T) {
+	// When copying from stdin, content size is unknown.
+	// The message should report transferred bytes without "(transferred ...)".
+	r, w, _ := os.Pipe()
+	_, _ = w.WriteString("some data from stdin")
+	w.Close()
+	oldStdin := os.Stdin
+	os.Stdin = r
+	t.Cleanup(func() { os.Stdin = oldStdin })
+
+	fakeCli := test.NewFakeCli(&fakeClient{
+		containerStatPathFunc: func(containerID, path string) (client.ContainerStatPathResult, error) {
+			return client.ContainerStatPathResult{
+				Stat: container.PathStat{
+					Name: "tmp",
+					Mode: os.ModeDir | 0o755,
+				},
+			}, nil
+		},
+		containerCopyToFunc: func(containerID string, options client.CopyToContainerOptions) (client.CopyToContainerResult, error) {
+			_, _ = io.Copy(io.Discard, options.Content)
+			return client.CopyToContainerResult{}, nil
+		},
+	})
+	err := runCopy(context.TODO(), fakeCli, copyOptions{
+		source:      "-",
+		destination: "container:/tmp",
+	})
+	assert.NilError(t, err)
+	errOut := fakeCli.ErrBuffer().String()
+	assert.Check(t, is.Contains(errOut, "Successfully copied"))
+	// stdin has no content size, so reportedSize == copiedSize and
+	// "(transferred ...)" should not appear.
+	assert.Check(t, !strings.Contains(errOut, "(transferred"))
+}
+
+func TestCopyFromContainerDoesNotReportSuccessOnFailure(t *testing.T) {
+	// Copying a directory onto an existing regular file fails while
+	// extracting ("cannot copy directory"). The failure must not be
+	// preceded by a "Successfully copied" message.
+	srcDir := fs.NewDir(t, "cp-test-fromdir-fail",
+		fs.WithFile("file1", "hello"))
+	destFile := fs.NewFile(t, "cp-test-fromdir-fail-dest", fs.WithContent("original\n"))
+
+	fakeCli := test.NewFakeCli(&fakeClient{
+		containerCopyFromFunc: func(ctr, srcPath string) (client.CopyFromContainerResult, error) {
+			readCloser, err := archive.Tar(srcDir.Path(), compression.None)
+			return client.CopyFromContainerResult{
+				Content: readCloser,
+				Stat: container.PathStat{
+					Name: "mydir",
+					Mode: os.ModeDir | 0o755,
+				},
+			}, err
+		},
+	})
+	err := runCopy(context.TODO(), fakeCli, copyOptions{
+		source:      "container:/mydir",
+		destination: destFile.Path(),
+	})
+	assert.ErrorContains(t, err, "cannot copy directory")
+	assert.Check(t, !strings.Contains(fakeCli.ErrBuffer().String(), "Successfully copied"),
+		"unexpected success message in output: %q", fakeCli.ErrBuffer().String())
+
+	content, err := os.ReadFile(destFile.Path())
+	assert.NilError(t, err)
+	assert.Check(t, is.Equal("original\n", string(content)))
+}
+
+func TestCopyToContainerDoesNotReportSuccessOnFailure(t *testing.T) {
+	// A failed upload must not be followed by a "Successfully copied"
+	// message.
+	srcFile := fs.NewFile(t, "cp-test-to-fail", fs.WithContent("hello"))
+
+	fakeCli := test.NewFakeCli(&fakeClient{
+		containerStatPathFunc: func(containerID, path string) (client.ContainerStatPathResult, error) {
+			return client.ContainerStatPathResult{
+				Stat: container.PathStat{
+					Name: "tmp",
+					Mode: os.ModeDir | 0o755,
+				},
+			}, nil
+		},
+		containerCopyToFunc: func(containerID string, options client.CopyToContainerOptions) (client.CopyToContainerResult, error) {
+			_, _ = io.Copy(io.Discard, options.Content)
+			return client.CopyToContainerResult{}, errors.New("copy to container failed")
+		},
+	})
+	err := runCopy(context.TODO(), fakeCli, copyOptions{
+		source:      srcFile.Path(),
+		destination: "container:/tmp",
+	})
+	assert.ErrorContains(t, err, "copy to container failed")
+	assert.Check(t, !strings.Contains(fakeCli.ErrBuffer().String(), "Successfully copied"),
+		"unexpected success message in output: %q", fakeCli.ErrBuffer().String())
 }

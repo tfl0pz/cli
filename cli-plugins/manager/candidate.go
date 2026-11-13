@@ -1,14 +1,10 @@
 package manager
 
 import (
-	exec "golang.org/x/sys/execabs"
-)
+	"os/exec"
 
-// Candidate represents a possible plugin candidate, for mocking purposes
-type Candidate interface {
-	Path() string
-	Metadata() ([]byte, error)
-}
+	"github.com/docker/cli/cli-plugins/metadata"
+)
 
 type candidate struct {
 	path string
@@ -19,5 +15,5 @@ func (c *candidate) Path() string {
 }
 
 func (c *candidate) Metadata() ([]byte, error) {
-	return exec.Command(c.path, MetadataSubcommandName).Output()
+	return exec.Command(c.path, metadata.MetadataSubcommandName).Output() // #nosec G204 -- ignore "Subprocess launched with a potential tainted input or cmd arguments"
 }

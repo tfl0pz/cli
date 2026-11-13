@@ -2,18 +2,19 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"strings"
 
+	"github.com/distribution/reference"
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
-	"github.com/docker/distribution/reference"
-	"github.com/docker/docker/pkg/jsonmessage"
-	"github.com/pkg/errors"
+	"github.com/docker/cli/internal/jsonstream"
+	"github.com/docker/cli/internal/prompt"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
-func newUpgradeCommand(dockerCli command.Cli) *cobra.Command {
+func newUpgradeCommand(dockerCLI command.Cli) *cobra.Command {
 	var options pluginOptions
 	cmd := &cobra.Command{
 		Use:   "upgrade [OPTIONS] PLUGIN [REMOTE]",
@@ -24,67 +25,78 @@ func newUpgradeCommand(dockerCli command.Cli) *cobra.Command {
 			if len(args) == 2 {
 				options.remote = args[1]
 			}
-			return runUpgrade(dockerCli, options)
+			return runUpgrade(cmd.Context(), dockerCLI, options)
 		},
-		Annotations: map[string]string{"version": "1.26"},
+		Annotations:           map[string]string{"version": "1.26"},
+		ValidArgsFunction:     completeNames(dockerCLI, stateAny), // TODO(thaJeztah): should only complete for the first arg
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
-	loadPullFlags(dockerCli, &options, flags)
+	flags.BoolVar(&options.grantPerms, "grant-all-permissions", false, "Grant all permissions necessary to run the plugin")
+	// TODO(thaJeztah): DEPRECATED: remove in v29.1 or v30
+	flags.Bool("disable-content-trust", true, "Skip image verification (deprecated)")
+	_ = flags.MarkDeprecated("disable-content-trust", "support for docker content trust was removed")
 	flags.BoolVar(&options.skipRemoteCheck, "skip-remote-check", false, "Do not check if specified remote plugin matches existing plugin image")
 	return cmd
 }
 
-func runUpgrade(dockerCli command.Cli, opts pluginOptions) error {
-	ctx := context.Background()
-	p, _, err := dockerCli.Client().PluginInspectWithRaw(ctx, opts.localName)
+func runUpgrade(ctx context.Context, dockerCLI command.Cli, opts pluginOptions) error {
+	res, err := dockerCLI.Client().PluginInspect(ctx, opts.localName, client.PluginInspectOptions{})
 	if err != nil {
-		return errors.Errorf("error reading plugin data: %v", err)
+		return fmt.Errorf("error reading plugin data: %w", err)
 	}
 
-	if p.Enabled {
-		return errors.Errorf("the plugin must be disabled before upgrading")
+	if res.Plugin.Enabled {
+		return errors.New("the plugin must be disabled before upgrading")
 	}
 
-	opts.localName = p.Name
+	opts.localName = res.Plugin.Name
 	if opts.remote == "" {
-		opts.remote = p.PluginReference
+		opts.remote = res.Plugin.PluginReference
 	}
 	remote, err := reference.ParseNormalizedNamed(opts.remote)
 	if err != nil {
-		return errors.Wrap(err, "error parsing remote upgrade image reference")
+		return fmt.Errorf("error parsing remote upgrade image reference: %w", err)
 	}
 	remote = reference.TagNameOnly(remote)
 
-	old, err := reference.ParseNormalizedNamed(p.PluginReference)
+	old, err := reference.ParseNormalizedNamed(res.Plugin.PluginReference)
 	if err != nil {
-		return errors.Wrap(err, "error parsing current image reference")
+		return fmt.Errorf("error parsing current image reference: %w", err)
 	}
 	old = reference.TagNameOnly(old)
 
-	fmt.Fprintf(dockerCli.Out(), "Upgrading plugin %s from %s to %s\n", p.Name, reference.FamiliarString(old), reference.FamiliarString(remote))
+	_, _ = fmt.Fprintf(dockerCLI.Out(), "Upgrading plugin %s from %s to %s\n", res.Plugin.Name, reference.FamiliarString(old), reference.FamiliarString(remote))
 	if !opts.skipRemoteCheck && remote.String() != old.String() {
-		if !command.PromptForConfirmation(dockerCli.In(), dockerCli.Out(), "Plugin images do not match, are you sure?") {
-			return errors.New("canceling upgrade request")
+		r, err := prompt.Confirm(ctx, dockerCLI.In(), dockerCLI.Out(), "Plugin images do not match, are you sure?")
+		if err != nil {
+			return err
+		}
+		if !r {
+			return cancelledErr{errors.New("plugin upgrade has been cancelled")}
 		}
 	}
 
-	options, err := buildPullConfig(ctx, dockerCli, opts, "plugin upgrade")
+	options, err := buildPullConfig(dockerCLI, opts)
 	if err != nil {
 		return err
 	}
 
-	responseBody, err := dockerCli.Client().PluginUpgrade(ctx, opts.localName, options)
+	responseBody, err := dockerCLI.Client().PluginUpgrade(ctx, opts.localName, client.PluginUpgradeOptions(options))
 	if err != nil {
-		if strings.Contains(err.Error(), "target is image") {
-			return errors.New(err.Error() + " - Use `docker image pull`")
-		}
 		return err
 	}
-	defer responseBody.Close()
-	if err := jsonmessage.DisplayJSONMessagesToStream(responseBody, dockerCli.Out(), nil); err != nil {
+	defer func() {
+		_ = responseBody.Close()
+	}()
+	if err := jsonstream.Display(ctx, responseBody, dockerCLI.Out()); err != nil {
 		return err
 	}
-	fmt.Fprintf(dockerCli.Out(), "Upgraded plugin %s to %s\n", opts.localName, opts.remote) // todo: return proper values from the API for this result
+	_, _ = fmt.Fprintf(dockerCLI.Out(), "Upgraded plugin %s to %s\n", opts.localName, opts.remote) // todo: return proper values from the API for this result
 	return nil
 }
+
+type cancelledErr struct{ error }
+
+func (cancelledErr) Cancelled() {}

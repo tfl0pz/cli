@@ -1,21 +1,20 @@
 package plugin
 
 import (
-	"fmt"
-	"io/ioutil"
+	"errors"
+	"io"
 	"testing"
 
 	"github.com/docker/cli/internal/test"
-	"github.com/docker/docker/api/types"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
 
 func TestRemoveErrors(t *testing.T) {
-
 	testCases := []struct {
 		args             []string
-		pluginRemoveFunc func(name string, options types.PluginRemoveOptions) error
+		pluginRemoveFunc func(name string, options client.PluginRemoveOptions) (client.PluginRemoveResult, error)
 		expectedError    string
 	}{
 		{
@@ -24,10 +23,10 @@ func TestRemoveErrors(t *testing.T) {
 		},
 		{
 			args: []string{"plugin-foo"},
-			pluginRemoveFunc: func(name string, options types.PluginRemoveOptions) error {
-				return fmt.Errorf("Error removing plugin")
+			pluginRemoveFunc: func(name string, options client.PluginRemoveOptions) (client.PluginRemoveResult, error) {
+				return client.PluginRemoveResult{}, errors.New("error removing plugin")
 			},
-			expectedError: "Error removing plugin",
+			expectedError: "error removing plugin",
 		},
 	}
 
@@ -37,17 +36,14 @@ func TestRemoveErrors(t *testing.T) {
 		})
 		cmd := newRemoveCommand(cli)
 		cmd.SetArgs(tc.args)
-		cmd.SetOut(ioutil.Discard)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
 		assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
 	}
 }
 
 func TestRemove(t *testing.T) {
-	cli := test.NewFakeCli(&fakeClient{
-		pluginRemoveFunc: func(name string, options types.PluginRemoveOptions) error {
-			return nil
-		},
-	})
+	cli := test.NewFakeCli(&fakeClient{})
 	cmd := newRemoveCommand(cli)
 	cmd.SetArgs([]string{"plugin-foo"})
 	assert.NilError(t, cmd.Execute())
@@ -57,14 +53,14 @@ func TestRemove(t *testing.T) {
 func TestRemoveWithForceOption(t *testing.T) {
 	force := false
 	cli := test.NewFakeCli(&fakeClient{
-		pluginRemoveFunc: func(name string, options types.PluginRemoveOptions) error {
+		pluginRemoveFunc: func(name string, options client.PluginRemoveOptions) (client.PluginRemoveResult, error) {
 			force = options.Force
-			return nil
+			return client.PluginRemoveResult{}, nil
 		},
 	})
 	cmd := newRemoveCommand(cli)
 	cmd.SetArgs([]string{"plugin-foo"})
-	cmd.Flags().Set("force", "true")
+	assert.NilError(t, cmd.Flags().Set("force", "true"))
 	assert.NilError(t, cmd.Execute())
 	assert.Check(t, force)
 	assert.Check(t, is.Equal("plugin-foo\n", cli.OutBuffer().String()))

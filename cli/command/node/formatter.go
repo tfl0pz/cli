@@ -1,17 +1,16 @@
 package node
 
 import (
+	"bytes"
 	"encoding/base64"
 	"fmt"
-	"reflect"
 	"strings"
 
-	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/formatter"
 	"github.com/docker/cli/cli/command/inspect"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/swarm"
-	units "github.com/docker/go-units"
+	"github.com/docker/go-units"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 )
 
 const (
@@ -80,8 +79,8 @@ TLS Info:
 	tlsStatusHeader     = "TLS STATUS"
 )
 
-// NewFormat returns a Format for rendering using a node Context
-func NewFormat(source string, quiet bool) formatter.Format {
+// newFormat returns a Format for rendering using a nodeContext.
+func newFormat(source string, quiet bool) formatter.Format {
 	switch source {
 	case formatter.PrettyFormatKey:
 		return nodeInspectPrettyTemplate
@@ -99,35 +98,39 @@ func NewFormat(source string, quiet bool) formatter.Format {
 	return formatter.Format(source)
 }
 
-// FormatWrite writes the context
-func FormatWrite(ctx formatter.Context, nodes []swarm.Node, info types.Info) error {
-	render := func(format func(subContext formatter.SubContext) error) error {
-		for _, node := range nodes {
-			nodeCtx := &nodeContext{n: node, info: info}
-			if err := format(nodeCtx); err != nil {
+// formatWrite writes the context.
+func formatWrite(fmtCtx formatter.Context, nodes client.NodeListResult, info client.SystemInfoResult) error {
+	nodeCtx := &nodeContext{
+		HeaderContext: formatter.HeaderContext{
+			Header: formatter.SubHeaderContext{
+				"ID":            nodeIDHeader,
+				"Self":          selfHeader,
+				"Hostname":      hostnameHeader,
+				"Status":        formatter.StatusHeader,
+				"Availability":  availabilityHeader,
+				"ManagerStatus": managerStatusHeader,
+				"EngineVersion": engineVersionHeader,
+				"TLSStatus":     tlsStatusHeader,
+			},
+		},
+	}
+	return fmtCtx.Write(nodeCtx, func(format func(subContext formatter.SubContext) error) error {
+		for _, node := range nodes.Items {
+			if err := format(&nodeContext{
+				n:    node,
+				info: info.Info.Swarm,
+			}); err != nil {
 				return err
 			}
 		}
 		return nil
-	}
-	nodeCtx := nodeContext{}
-	nodeCtx.Header = formatter.SubHeaderContext{
-		"ID":            nodeIDHeader,
-		"Self":          selfHeader,
-		"Hostname":      hostnameHeader,
-		"Status":        formatter.StatusHeader,
-		"Availability":  availabilityHeader,
-		"ManagerStatus": managerStatusHeader,
-		"EngineVersion": engineVersionHeader,
-		"TLSStatus":     tlsStatusHeader,
-	}
-	return ctx.Write(&nodeCtx, render)
+	})
 }
 
 type nodeContext struct {
 	formatter.HeaderContext
 	n    swarm.Node
-	info types.Info
+	info swarm.Info
 }
 
 func (c *nodeContext) MarshalJSON() ([]byte, error) {
@@ -139,7 +142,7 @@ func (c *nodeContext) ID() string {
 }
 
 func (c *nodeContext) Self() bool {
-	return c.n.ID == c.info.Swarm.NodeID
+	return c.n.ID == c.info.NodeID
 }
 
 func (c *nodeContext) Hostname() string {
@@ -147,11 +150,11 @@ func (c *nodeContext) Hostname() string {
 }
 
 func (c *nodeContext) Status() string {
-	return command.PrettyPrint(string(c.n.Status.State))
+	return formatter.PrettyPrint(string(c.n.Status.State))
 }
 
 func (c *nodeContext) Availability() string {
-	return command.PrettyPrint(string(c.n.Spec.Availability))
+	return formatter.PrettyPrint(string(c.n.Spec.Availability))
 }
 
 func (c *nodeContext) ManagerStatus() string {
@@ -163,29 +166,37 @@ func (c *nodeContext) ManagerStatus() string {
 			reachability = string(c.n.ManagerStatus.Reachability)
 		}
 	}
-	return command.PrettyPrint(reachability)
+	return formatter.PrettyPrint(reachability)
 }
 
 func (c *nodeContext) TLSStatus() string {
-	if c.info.Swarm.Cluster == nil || reflect.DeepEqual(c.info.Swarm.Cluster.TLSInfo, swarm.TLSInfo{}) || reflect.DeepEqual(c.n.Description.TLSInfo, swarm.TLSInfo{}) {
+	if c.info.Cluster == nil || isEmptyTLSInfo(c.info.Cluster.TLSInfo) || isEmptyTLSInfo(c.n.Description.TLSInfo) {
 		return "Unknown"
 	}
-	if reflect.DeepEqual(c.n.Description.TLSInfo, c.info.Swarm.Cluster.TLSInfo) {
+	if equalTLSInfo(c.n.Description.TLSInfo, c.info.Cluster.TLSInfo) {
 		return "Ready"
 	}
 	return "Needs Rotation"
+}
+
+func isEmptyTLSInfo(t swarm.TLSInfo) bool {
+	return t.TrustRoot == "" && len(t.CertIssuerSubject) == 0 && len(t.CertIssuerPublicKey) == 0
+}
+
+func equalTLSInfo(t, o swarm.TLSInfo) bool {
+	return t.TrustRoot == o.TrustRoot && bytes.Equal(t.CertIssuerSubject, o.CertIssuerSubject) && bytes.Equal(t.CertIssuerPublicKey, o.CertIssuerPublicKey)
 }
 
 func (c *nodeContext) EngineVersion() string {
 	return c.n.Description.Engine.EngineVersion
 }
 
-// InspectFormatWrite renders the context for a list of nodes
-func InspectFormatWrite(ctx formatter.Context, refs []string, getRef inspect.GetRefFunc) error {
-	if ctx.Format != nodeInspectPrettyTemplate {
-		return inspect.Inspect(ctx.Output, refs, string(ctx.Format), getRef)
+// inspectFormatWrite renders the context for a list of nodes.
+func inspectFormatWrite(fmtCtx formatter.Context, refs []string, getRef inspect.GetRefFunc) error {
+	if fmtCtx.Format != nodeInspectPrettyTemplate {
+		return inspect.Inspect(fmtCtx.Output, refs, string(fmtCtx.Format), getRef)
 	}
-	render := func(format func(subContext formatter.SubContext) error) error {
+	return fmtCtx.Write(&nodeInspectContext{}, func(format func(subContext formatter.SubContext) error) error {
 		for _, ref := range refs {
 			nodeI, _, err := getRef(ref)
 			if err != nil {
@@ -200,8 +211,7 @@ func InspectFormatWrite(ctx formatter.Context, refs []string, getRef inspect.Get
 			}
 		}
 		return nil
-	}
-	return ctx.Write(&nodeInspectContext{}, render)
+	})
 }
 
 type nodeInspectContext struct {
@@ -226,11 +236,11 @@ func (ctx *nodeInspectContext) Hostname() string {
 }
 
 func (ctx *nodeInspectContext) CreatedAt() string {
-	return command.PrettyPrint(ctx.Node.CreatedAt)
+	return formatter.PrettyPrint(ctx.Node.CreatedAt)
 }
 
 func (ctx *nodeInspectContext) StatusState() string {
-	return command.PrettyPrint(ctx.Node.Status.State)
+	return formatter.PrettyPrint(ctx.Node.Status.State)
 }
 
 func (ctx *nodeInspectContext) HasStatusMessage() bool {
@@ -238,11 +248,11 @@ func (ctx *nodeInspectContext) HasStatusMessage() bool {
 }
 
 func (ctx *nodeInspectContext) StatusMessage() string {
-	return command.PrettyPrint(ctx.Node.Status.Message)
+	return formatter.PrettyPrint(ctx.Node.Status.Message)
 }
 
 func (ctx *nodeInspectContext) SpecAvailability() string {
-	return command.PrettyPrint(ctx.Node.Spec.Availability)
+	return formatter.PrettyPrint(ctx.Node.Spec.Availability)
 }
 
 func (ctx *nodeInspectContext) HasStatusAddr() bool {
@@ -262,7 +272,7 @@ func (ctx *nodeInspectContext) ManagerStatusAddr() string {
 }
 
 func (ctx *nodeInspectContext) ManagerStatusReachability() string {
-	return command.PrettyPrint(ctx.Node.ManagerStatus.Reachability)
+	return formatter.PrettyPrint(ctx.Node.ManagerStatus.Reachability)
 }
 
 func (ctx *nodeInspectContext) IsManagerStatusLeader() bool {
@@ -281,7 +291,8 @@ func (ctx *nodeInspectContext) ResourceNanoCPUs() int {
 	if ctx.Node.Description.Resources.NanoCPUs == 0 {
 		return int(0)
 	}
-	return int(ctx.Node.Description.Resources.NanoCPUs) / 1e9
+	const nano = 1e9
+	return int(ctx.Node.Description.Resources.NanoCPUs) / nano
 }
 
 func (ctx *nodeInspectContext) ResourceMemory() string {
@@ -317,8 +328,7 @@ func (ctx *nodeInspectContext) EngineVersion() string {
 }
 
 func (ctx *nodeInspectContext) HasTLSInfo() bool {
-	tlsInfo := ctx.Node.Description.TLSInfo
-	return !reflect.DeepEqual(tlsInfo, swarm.TLSInfo{})
+	return !isEmptyTLSInfo(ctx.Node.Description.TLSInfo)
 }
 
 func (ctx *nodeInspectContext) TLSInfoTrustRoot() string {

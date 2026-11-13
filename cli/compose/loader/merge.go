@@ -1,12 +1,17 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package loader
 
 import (
+	"cmp"
+	"errors"
+	"fmt"
 	"reflect"
-	"sort"
+	"slices"
 
+	"dario.cat/mergo"
 	"github.com/docker/cli/cli/compose/types"
-	"github.com/imdario/mergo"
-	"github.com/pkg/errors"
 )
 
 type specials struct {
@@ -23,131 +28,176 @@ func (s *specials) Transformer(t reflect.Type) func(dst, src reflect.Value) erro
 func merge(configs []*types.Config) (*types.Config, error) {
 	base := configs[0]
 	for _, override := range configs[1:] {
-		var err error
-		base.Services, err = mergeServices(base.Services, override.Services)
-		if err != nil {
-			return base, errors.Wrapf(err, "cannot merge services from %s", override.Filename)
+		var errs []error
+		if services, err := mergeServices(base.Services, override.Services); err != nil {
+			errs = append(errs, fmt.Errorf("cannot merge services: %w", err))
+		} else {
+			base.Services = services
 		}
-		base.Volumes, err = mergeVolumes(base.Volumes, override.Volumes)
-		if err != nil {
-			return base, errors.Wrapf(err, "cannot merge volumes from %s", override.Filename)
+		if err := mergo.Map(&base.Volumes, &override.Volumes, mergo.WithOverride); err != nil {
+			errs = append(errs, fmt.Errorf("cannot merge volumes: %w", err))
 		}
-		base.Networks, err = mergeNetworks(base.Networks, override.Networks)
-		if err != nil {
-			return base, errors.Wrapf(err, "cannot merge networks from %s", override.Filename)
+		if err := mergo.Map(&base.Networks, &override.Networks, mergo.WithOverride); err != nil {
+			errs = append(errs, fmt.Errorf("cannot merge networks: %w", err))
 		}
-		base.Secrets, err = mergeSecrets(base.Secrets, override.Secrets)
-		if err != nil {
-			return base, errors.Wrapf(err, "cannot merge secrets from %s", override.Filename)
+		if err := mergo.Map(&base.Secrets, &override.Secrets, mergo.WithOverride); err != nil {
+			errs = append(errs, fmt.Errorf("cannot merge secrets: %w", err))
 		}
-		base.Configs, err = mergeConfigs(base.Configs, override.Configs)
-		if err != nil {
-			return base, errors.Wrapf(err, "cannot merge configs from %s", override.Filename)
+		if err := mergo.Map(&base.Configs, &override.Configs, mergo.WithOverride); err != nil {
+			errs = append(errs, fmt.Errorf("cannot merge configs: %w", err))
+		}
+		if err := errors.Join(errs...); err != nil {
+			return nil, errors.Join(fmt.Errorf("failed to merge file %s", override.Filename), err)
 		}
 	}
 	return base, nil
 }
 
 func mergeServices(base, override []types.ServiceConfig) ([]types.ServiceConfig, error) {
-	baseServices := mapByName(base)
-	overrideServices := mapByName(override)
-	specials := &specials{
-		m: map[reflect.Type]func(dst, src reflect.Value) error{
-			reflect.TypeOf(&types.LoggingConfig{}):           safelyMerge(mergeLoggingConfig),
-			reflect.TypeOf([]types.ServicePortConfig{}):      mergeSlice(toServicePortConfigsMap, toServicePortConfigsSlice),
-			reflect.TypeOf([]types.ServiceSecretConfig{}):    mergeSlice(toServiceSecretConfigsMap, toServiceSecretConfigsSlice),
-			reflect.TypeOf([]types.ServiceConfigObjConfig{}): mergeSlice(toServiceConfigObjConfigsMap, toSServiceConfigObjConfigsSlice),
-			reflect.TypeOf(&types.UlimitsConfig{}):           mergeUlimitsConfig,
-			reflect.TypeOf(&types.ServiceNetworkConfig{}):    mergeServiceNetworkConfig,
-		},
+	mergeOpts := []func(*mergo.Config){
+		mergo.WithAppendSlice,
+		mergo.WithOverride,
+		mergo.WithTransformers(&specials{m: map[reflect.Type]func(dst, src reflect.Value) error{
+			reflect.PointerTo(reflect.TypeFor[types.LoggingConfig]()):        safelyMerge(mergeLoggingConfig),
+			reflect.TypeFor[[]types.ServicePortConfig]():                     mergeSlice(toServicePortConfigsMap, toServicePortConfigsSlice),
+			reflect.TypeFor[[]types.ServiceSecretConfig]():                   mergeSlice(toServiceSecretConfigsMap, toServiceSecretConfigsSlice),
+			reflect.TypeFor[[]types.ServiceConfigObjConfig]():                mergeSlice(toServiceConfigObjConfigsMap, toSServiceConfigObjConfigsSlice),
+			reflect.PointerTo(reflect.TypeFor[types.UlimitsConfig]()):        mergeUlimitsConfig,
+			reflect.TypeFor[[]types.ServiceVolumeConfig]():                   mergeSlice(toServiceVolumeConfigsMap, toServiceVolumeConfigsSlice),
+			reflect.TypeFor[types.ShellCommand]():                            mergeShellCommand,
+			reflect.PointerTo(reflect.TypeFor[types.ServiceNetworkConfig]()): mergeServiceNetworkConfig,
+			reflect.PointerTo(reflect.TypeFor[uint64]()):                     mergeUint64,
+		}}),
 	}
-	for name, overrideService := range overrideServices {
-		overrideService := overrideService
-		if baseService, ok := baseServices[name]; ok {
-			if err := mergo.Merge(&baseService, &overrideService, mergo.WithAppendSlice, mergo.WithOverride, mergo.WithTransformers(specials)); err != nil {
-				return base, errors.Wrapf(err, "cannot merge service %s", name)
+
+	baseServices := make(map[string]types.ServiceConfig, len(base))
+	for _, s := range base {
+		baseServices[s.Name] = s
+	}
+
+	for _, overrideService := range override {
+		if baseService, ok := baseServices[overrideService.Name]; ok {
+			if err := mergo.Merge(&baseService, &overrideService, mergeOpts...); err != nil {
+				return nil, fmt.Errorf("cannot merge service %s: %w", overrideService.Name, err)
 			}
-			baseServices[name] = baseService
+			baseServices[overrideService.Name] = baseService
 			continue
 		}
-		baseServices[name] = overrideService
+		baseServices[overrideService.Name] = overrideService
 	}
-	services := []types.ServiceConfig{}
+
+	services := make([]types.ServiceConfig, 0, len(baseServices))
 	for _, baseService := range baseServices {
 		services = append(services, baseService)
 	}
-	sort.Slice(services, func(i, j int) bool { return services[i].Name < services[j].Name })
+
+	slices.SortFunc(services, func(a, b types.ServiceConfig) int {
+		return cmp.Compare(a.Name, b.Name)
+	})
+
 	return services, nil
 }
 
-func toServiceSecretConfigsMap(s interface{}) (map[interface{}]interface{}, error) {
+func toServiceSecretConfigsMap(s any) (map[any]any, error) {
 	secrets, ok := s.([]types.ServiceSecretConfig)
 	if !ok {
-		return nil, errors.Errorf("not a serviceSecretConfig: %v", s)
+		return nil, fmt.Errorf("not a serviceSecretConfig: %v", s)
 	}
-	m := map[interface{}]interface{}{}
+	m := map[any]any{}
 	for _, secret := range secrets {
 		m[secret.Source] = secret
 	}
 	return m, nil
 }
 
-func toServiceConfigObjConfigsMap(s interface{}) (map[interface{}]interface{}, error) {
+func toServiceConfigObjConfigsMap(s any) (map[any]any, error) {
 	secrets, ok := s.([]types.ServiceConfigObjConfig)
 	if !ok {
-		return nil, errors.Errorf("not a serviceSecretConfig: %v", s)
+		return nil, fmt.Errorf("not a serviceSecretConfig: %v", s)
 	}
-	m := map[interface{}]interface{}{}
+	m := map[any]any{}
 	for _, secret := range secrets {
 		m[secret.Source] = secret
 	}
 	return m, nil
 }
 
-func toServicePortConfigsMap(s interface{}) (map[interface{}]interface{}, error) {
+func toServicePortConfigsMap(s any) (map[any]any, error) {
 	ports, ok := s.([]types.ServicePortConfig)
 	if !ok {
-		return nil, errors.Errorf("not a servicePortConfig slice: %v", s)
+		return nil, fmt.Errorf("not a servicePortConfig slice: %v", s)
 	}
-	m := map[interface{}]interface{}{}
+	m := map[any]any{}
 	for _, p := range ports {
 		m[p.Published] = p
 	}
 	return m, nil
 }
 
-func toServiceSecretConfigsSlice(dst reflect.Value, m map[interface{}]interface{}) error {
-	s := []types.ServiceSecretConfig{}
+func toServiceVolumeConfigsMap(s any) (map[any]any, error) {
+	volumes, ok := s.([]types.ServiceVolumeConfig)
+	if !ok {
+		return nil, fmt.Errorf("not a serviceVolumeConfig slice: %v", s)
+	}
+	m := map[any]any{}
+	for _, v := range volumes {
+		m[v.Target] = v
+	}
+	return m, nil
+}
+
+func toServiceSecretConfigsSlice(dst reflect.Value, m map[any]any) error {
+	s := make([]types.ServiceSecretConfig, 0, len(m))
 	for _, v := range m {
 		s = append(s, v.(types.ServiceSecretConfig))
 	}
-	sort.Slice(s, func(i, j int) bool { return s[i].Source < s[j].Source })
+	slices.SortFunc(s, func(a, b types.ServiceSecretConfig) int {
+		return cmp.Compare(a.Source, b.Source)
+	})
 	dst.Set(reflect.ValueOf(s))
 	return nil
 }
 
-func toSServiceConfigObjConfigsSlice(dst reflect.Value, m map[interface{}]interface{}) error {
-	s := []types.ServiceConfigObjConfig{}
+func toSServiceConfigObjConfigsSlice(dst reflect.Value, m map[any]any) error {
+	s := make([]types.ServiceConfigObjConfig, 0, len(m))
 	for _, v := range m {
 		s = append(s, v.(types.ServiceConfigObjConfig))
 	}
-	sort.Slice(s, func(i, j int) bool { return s[i].Source < s[j].Source })
+	slices.SortFunc(s, func(a, b types.ServiceConfigObjConfig) int {
+		return cmp.Compare(a.Source, b.Source)
+	})
 	dst.Set(reflect.ValueOf(s))
 	return nil
 }
 
-func toServicePortConfigsSlice(dst reflect.Value, m map[interface{}]interface{}) error {
-	s := []types.ServicePortConfig{}
+func toServicePortConfigsSlice(dst reflect.Value, m map[any]any) error {
+	s := make([]types.ServicePortConfig, 0, len(m))
 	for _, v := range m {
 		s = append(s, v.(types.ServicePortConfig))
 	}
-	sort.Slice(s, func(i, j int) bool { return s[i].Published < s[j].Published })
+	slices.SortFunc(s, func(a, b types.ServicePortConfig) int {
+		return cmp.Compare(a.Published, b.Published)
+	})
 	dst.Set(reflect.ValueOf(s))
 	return nil
 }
 
-type tomapFn func(s interface{}) (map[interface{}]interface{}, error)
-type writeValueFromMapFn func(reflect.Value, map[interface{}]interface{}) error
+func toServiceVolumeConfigsSlice(dst reflect.Value, m map[any]any) error {
+	s := make([]types.ServiceVolumeConfig, 0, len(m))
+	for _, v := range m {
+		s = append(s, v.(types.ServiceVolumeConfig))
+	}
+	slices.SortFunc(s, func(a, b types.ServiceVolumeConfig) int {
+		return cmp.Compare(a.Target, b.Target)
+	})
+	dst.Set(reflect.ValueOf(s))
+	return nil
+}
+
+type (
+	tomapFn             func(s any) (map[any]any, error)
+	writeValueFromMapFn func(reflect.Value, map[any]any) error
+)
 
 func safelyMerge(mergeFn func(dst, src reflect.Value) error) func(dst, src reflect.Value) error {
 	return func(dst, src reflect.Value) error {
@@ -179,20 +229,22 @@ func mergeSlice(tomap tomapFn, writeValue writeValueFromMapFn) func(dst, src ref
 	}
 }
 
-func sliceToMap(tomap tomapFn, v reflect.Value) (map[interface{}]interface{}, error) {
+func sliceToMap(tomap tomapFn, v reflect.Value) (map[any]any, error) {
 	// check if valid
 	if !v.IsValid() {
-		return nil, errors.Errorf("invalid value : %+v", v)
+		return nil, fmt.Errorf("invalid value : %+v", v)
 	}
 	return tomap(v.Interface())
 }
 
 func mergeLoggingConfig(dst, src reflect.Value) error {
+	dstDriver := dst.Elem().FieldByName("Driver").String()
+	srcDriver := src.Elem().FieldByName("Driver").String()
+
 	// Same driver, merging options
-	if getLoggingDriver(dst.Elem()) == getLoggingDriver(src.Elem()) ||
-		getLoggingDriver(dst.Elem()) == "" || getLoggingDriver(src.Elem()) == "" {
-		if getLoggingDriver(dst.Elem()) == "" {
-			dst.Elem().FieldByName("Driver").SetString(getLoggingDriver(src.Elem()))
+	if dstDriver == srcDriver || dstDriver == "" || srcDriver == "" {
+		if dstDriver == "" {
+			dst.Elem().FieldByName("Driver").SetString(srcDriver)
 		}
 		dstOptions := dst.Elem().FieldByName("Options").Interface().(map[string]string)
 		srcOptions := src.Elem().FieldByName("Options").Interface().(map[string]string)
@@ -203,7 +255,6 @@ func mergeLoggingConfig(dst, src reflect.Value) error {
 	return nil
 }
 
-//nolint: unparam
 func mergeUlimitsConfig(dst, src reflect.Value) error {
 	if src.Interface() != reflect.Zero(reflect.TypeOf(src.Interface())).Interface() {
 		dst.Elem().Set(src.Elem())
@@ -211,7 +262,13 @@ func mergeUlimitsConfig(dst, src reflect.Value) error {
 	return nil
 }
 
-//nolint: unparam
+func mergeShellCommand(dst, src reflect.Value) error {
+	if src.Len() != 0 {
+		dst.Set(src)
+	}
+	return nil
+}
+
 func mergeServiceNetworkConfig(dst, src reflect.Value) error {
 	if src.Interface() != reflect.Zero(reflect.TypeOf(src.Interface())).Interface() {
 		dst.Elem().FieldByName("Aliases").Set(src.Elem().FieldByName("Aliases"))
@@ -225,34 +282,9 @@ func mergeServiceNetworkConfig(dst, src reflect.Value) error {
 	return nil
 }
 
-func getLoggingDriver(v reflect.Value) string {
-	return v.FieldByName("Driver").String()
-}
-
-func mapByName(services []types.ServiceConfig) map[string]types.ServiceConfig {
-	m := map[string]types.ServiceConfig{}
-	for _, service := range services {
-		m[service.Name] = service
+func mergeUint64(dst, src reflect.Value) error {
+	if !src.IsNil() {
+		dst.Elem().Set(src.Elem())
 	}
-	return m
-}
-
-func mergeVolumes(base, override map[string]types.VolumeConfig) (map[string]types.VolumeConfig, error) {
-	err := mergo.Map(&base, &override, mergo.WithOverride)
-	return base, err
-}
-
-func mergeNetworks(base, override map[string]types.NetworkConfig) (map[string]types.NetworkConfig, error) {
-	err := mergo.Map(&base, &override, mergo.WithOverride)
-	return base, err
-}
-
-func mergeSecrets(base, override map[string]types.SecretConfig) (map[string]types.SecretConfig, error) {
-	err := mergo.Map(&base, &override, mergo.WithOverride)
-	return base, err
-}
-
-func mergeConfigs(base, override map[string]types.ConfigObjConfig) (map[string]types.ConfigObjConfig, error) {
-	err := mergo.Map(&base, &override, mergo.WithOverride)
-	return base, err
+	return nil
 }

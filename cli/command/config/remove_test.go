@@ -1,12 +1,14 @@
 package config
 
 import (
-	"io/ioutil"
+	"context"
+	"errors"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/docker/cli/internal/test"
-	"github.com/pkg/errors"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
@@ -14,17 +16,17 @@ import (
 func TestConfigRemoveErrors(t *testing.T) {
 	testCases := []struct {
 		args             []string
-		configRemoveFunc func(string) error
+		configRemoveFunc func(context.Context, string, client.ConfigRemoveOptions) (client.ConfigRemoveResult, error)
 		expectedError    string
 	}{
 		{
 			args:          []string{},
-			expectedError: "requires at least 1 argument.",
+			expectedError: "requires at least 1 argument",
 		},
 		{
 			args: []string{"foo"},
-			configRemoveFunc: func(name string) error {
-				return errors.Errorf("error removing config")
+			configRemoveFunc: func(ctx context.Context, name string, options client.ConfigRemoveOptions) (client.ConfigRemoveResult, error) {
+				return client.ConfigRemoveResult{}, errors.New("error removing config")
 			},
 			expectedError: "error removing config",
 		},
@@ -36,7 +38,8 @@ func TestConfigRemoveErrors(t *testing.T) {
 			}),
 		)
 		cmd.SetArgs(tc.args)
-		cmd.SetOut(ioutil.Discard)
+		cmd.SetOut(io.Discard)
+		cmd.SetErr(io.Discard)
 		assert.ErrorContains(t, cmd.Execute(), tc.expectedError)
 	}
 }
@@ -45,9 +48,9 @@ func TestConfigRemoveWithName(t *testing.T) {
 	names := []string{"foo", "bar"}
 	var removedConfigs []string
 	cli := test.NewFakeCli(&fakeClient{
-		configRemoveFunc: func(name string) error {
+		configRemoveFunc: func(_ context.Context, name string, _ client.ConfigRemoveOptions) (client.ConfigRemoveResult, error) {
 			removedConfigs = append(removedConfigs, name)
-			return nil
+			return client.ConfigRemoveResult{}, nil
 		},
 	})
 	cmd := newConfigRemoveCommand(cli)
@@ -62,18 +65,19 @@ func TestConfigRemoveContinueAfterError(t *testing.T) {
 	var removedConfigs []string
 
 	cli := test.NewFakeCli(&fakeClient{
-		configRemoveFunc: func(name string) error {
+		configRemoveFunc: func(_ context.Context, name string, _ client.ConfigRemoveOptions) (client.ConfigRemoveResult, error) {
 			removedConfigs = append(removedConfigs, name)
 			if name == "foo" {
-				return errors.Errorf("error removing config: %s", name)
+				return client.ConfigRemoveResult{}, errors.New("error removing config: " + name)
 			}
-			return nil
+			return client.ConfigRemoveResult{}, nil
 		},
 	})
 
 	cmd := newConfigRemoveCommand(cli)
 	cmd.SetArgs(names)
-	cmd.SetOut(ioutil.Discard)
+	cmd.SetOut(io.Discard)
+	cmd.SetErr(io.Discard)
 	assert.Error(t, cmd.Execute(), "error removing config: foo")
 	assert.Check(t, is.DeepEqual(names, removedConfigs))
 }

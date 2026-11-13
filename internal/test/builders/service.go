@@ -1,7 +1,7 @@
 package builders
 
 import (
-	"github.com/docker/docker/api/types/swarm"
+	"github.com/moby/moby/api/types/swarm"
 )
 
 // Service creates a service with default values.
@@ -18,9 +18,9 @@ func Service(builders ...func(*swarm.Service)) *swarm.Service {
 }
 
 // ServiceID sets the service ID
-func ServiceID(ID string) func(*swarm.Service) {
+func ServiceID(id string) func(*swarm.Service) {
 	return func(service *swarm.Service) {
-		service.ID = ID
+		service.ID = id
 	}
 }
 

@@ -7,9 +7,10 @@ import (
 	"time"
 
 	"github.com/docker/cli/opts"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/swarm"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 )
@@ -50,7 +51,6 @@ func TestCredentialSpecOpt(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			var cs credentialSpecOpt
 
@@ -108,20 +108,22 @@ func TestUint64OptSetAndValue(t *testing.T) {
 func TestHealthCheckOptionsToHealthConfig(t *testing.T) {
 	dur := time.Second
 	opt := healthCheckOptions{
-		cmd:         "curl",
-		interval:    opts.PositiveDurationOpt{DurationOpt: *opts.NewDurationOpt(&dur)},
-		timeout:     opts.PositiveDurationOpt{DurationOpt: *opts.NewDurationOpt(&dur)},
-		startPeriod: opts.PositiveDurationOpt{DurationOpt: *opts.NewDurationOpt(&dur)},
-		retries:     10,
+		cmd:           "curl",
+		interval:      opts.PositiveDurationOpt{DurationOpt: *opts.NewDurationOpt(&dur)},
+		timeout:       opts.PositiveDurationOpt{DurationOpt: *opts.NewDurationOpt(&dur)},
+		startPeriod:   opts.PositiveDurationOpt{DurationOpt: *opts.NewDurationOpt(&dur)},
+		startInterval: opts.PositiveDurationOpt{DurationOpt: *opts.NewDurationOpt(&dur)},
+		retries:       10,
 	}
 	config, err := opt.toHealthConfig()
 	assert.NilError(t, err)
 	assert.Check(t, is.DeepEqual(&container.HealthConfig{
-		Test:        []string{"CMD-SHELL", "curl"},
-		Interval:    time.Second,
-		Timeout:     time.Second,
-		StartPeriod: time.Second,
-		Retries:     10,
+		Test:          []string{"CMD-SHELL", "curl"},
+		Interval:      time.Second,
+		Timeout:       time.Second,
+		StartPeriod:   time.Second,
+		StartInterval: time.Second,
+		Retries:       10,
 	}, config))
 }
 
@@ -161,8 +163,10 @@ func TestResourceOptionsToResourceRequirements(t *testing.T) {
 		},
 	}
 
+	flags := newCreateCommand(nil).Flags()
+
 	for _, opt := range incorrectOptions {
-		_, err := opt.ToResourceRequirements()
+		_, err := opt.ToResourceRequirements(flags)
 		assert.Check(t, is.ErrorContains(err, ""))
 	}
 
@@ -176,28 +180,71 @@ func TestResourceOptionsToResourceRequirements(t *testing.T) {
 	}
 
 	for _, opt := range correctOptions {
-		r, err := opt.ToResourceRequirements()
+		r, err := opt.ToResourceRequirements(flags)
 		assert.NilError(t, err)
 		assert.Check(t, is.Len(r.Reservations.GenericResources, len(opt.resGenericResources)))
 	}
+}
 
+func TestResourceOptionsToResourceRequirementsSwap(t *testing.T) {
+	// first, check that no flag set means no field set in the return
+	flags := newCreateCommand(nil).Flags()
+
+	// These should be the default values of the field.
+	swapOptions := resourceOptions{
+		swapBytes:     0,
+		memSwappiness: -1,
+	}
+
+	r, err := swapOptions.ToResourceRequirements(flags)
+	assert.NilError(t, err)
+	assert.Check(t, is.Nil(r.SwapBytes))
+	assert.Check(t, is.Nil(r.MemorySwappiness))
+
+	// now set the flags and some values
+	flags.Set(flagSwapBytes, "86000")
+	flags.Set(flagMemSwappiness, "23")
+	swapOptions.swapBytes = 86000
+	swapOptions.memSwappiness = 23
+
+	r, err = swapOptions.ToResourceRequirements(flags)
+	assert.NilError(t, err)
+	assert.Check(t, r.SwapBytes != nil)
+	assert.Check(t, is.Equal(*r.SwapBytes, int64(86000)))
+	assert.Check(t, r.MemorySwappiness != nil)
+	assert.Check(t, is.Equal(*r.MemorySwappiness, int64(23)))
 }
 
 func TestToServiceNetwork(t *testing.T) {
-	nws := []types.NetworkResource{
-		{Name: "aaa-network", ID: "id555"},
-		{Name: "mmm-network", ID: "id999"},
-		{Name: "zzz-network", ID: "id111"},
+	nws := []network.Inspect{
+		{
+			Network: network.Network{
+				Name: "aaa-network",
+				ID:   "id555",
+			},
+		},
+		{
+			Network: network.Network{
+				Name: "mmm-network",
+				ID:   "id999",
+			},
+		},
+		{
+			Network: network.Network{
+				Name: "zzz-network",
+				ID:   "id111",
+			},
+		},
 	}
 
-	client := &fakeClient{
-		networkInspectFunc: func(ctx context.Context, networkID string, options types.NetworkInspectOptions) (types.NetworkResource, error) {
-			for _, network := range nws {
-				if network.ID == networkID || network.Name == networkID {
-					return network, nil
+	apiClient := &fakeClient{
+		networkInspectFunc: func(ctx context.Context, networkID string, options client.NetworkInspectOptions) (client.NetworkInspectResult, error) {
+			for _, nw := range nws {
+				if nw.ID == networkID || nw.Name == networkID {
+					return client.NetworkInspectResult{Network: nw}, nil
 				}
 			}
-			return types.NetworkResource{}, fmt.Errorf("network not found: %s", networkID)
+			return client.NetworkInspectResult{}, fmt.Errorf("network not found: %s", networkID)
 		},
 	}
 
@@ -212,7 +259,7 @@ func TestToServiceNetwork(t *testing.T) {
 
 	ctx := context.Background()
 	flags := newCreateCommand(nil).Flags()
-	service, err := o.ToService(ctx, client, flags)
+	service, err := o.ToService(ctx, apiClient, flags)
 	assert.NilError(t, err)
 	assert.Check(t, is.DeepEqual([]swarm.NetworkAttachmentConfig{{Target: "id111"}, {Target: "id555"}, {Target: "id999"}}, service.TaskTemplate.Networks))
 }
@@ -233,17 +280,17 @@ func TestToServiceUpdateRollback(t *testing.T) {
 			Parallelism:     23,
 			Delay:           34 * time.Second,
 			Monitor:         54321 * time.Nanosecond,
-			FailureAction:   "pause",
+			FailureAction:   swarm.UpdateFailureActionPause,
 			MaxFailureRatio: 0.6,
-			Order:           "stop-first",
+			Order:           swarm.UpdateOrderStopFirst,
 		},
 		RollbackConfig: &swarm.UpdateConfig{
 			Parallelism:     12,
 			Delay:           23 * time.Second,
 			Monitor:         12345 * time.Nanosecond,
-			FailureAction:   "continue",
+			FailureAction:   swarm.UpdateFailureActionContinue,
 			MaxFailureRatio: 0.5,
-			Order:           "start-first",
+			Order:           swarm.UpdateOrderStartFirst,
 		},
 	}
 
@@ -253,16 +300,16 @@ func TestToServiceUpdateRollback(t *testing.T) {
 	flags.Set("update-parallelism", "23")
 	flags.Set("update-delay", "34s")
 	flags.Set("update-monitor", "54321ns")
-	flags.Set("update-failure-action", "pause")
+	flags.Set("update-failure-action", string(swarm.UpdateFailureActionPause))
 	flags.Set("update-max-failure-ratio", "0.6")
-	flags.Set("update-order", "stop-first")
+	flags.Set("update-order", string(swarm.UpdateOrderStopFirst))
 
 	flags.Set("rollback-parallelism", "12")
 	flags.Set("rollback-delay", "23s")
 	flags.Set("rollback-monitor", "12345ns")
-	flags.Set("rollback-failure-action", "continue")
+	flags.Set("rollback-failure-action", string(swarm.UpdateFailureActionContinue))
 	flags.Set("rollback-max-failure-ratio", "0.5")
-	flags.Set("rollback-order", "start-first")
+	flags.Set("rollback-order", string(swarm.UpdateOrderStartFirst))
 
 	o := newServiceOptions()
 	o.mode = "replicated"
@@ -270,17 +317,17 @@ func TestToServiceUpdateRollback(t *testing.T) {
 		parallelism:     23,
 		delay:           34 * time.Second,
 		monitor:         54321 * time.Nanosecond,
-		onFailure:       "pause",
+		onFailure:       string(swarm.UpdateFailureActionPause),
 		maxFailureRatio: 0.6,
-		order:           "stop-first",
+		order:           string(swarm.UpdateOrderStopFirst),
 	}
 	o.rollback = updateOptions{
 		parallelism:     12,
 		delay:           23 * time.Second,
 		monitor:         12345 * time.Nanosecond,
-		onFailure:       "continue",
+		onFailure:       string(swarm.UpdateFailureActionContinue),
 		maxFailureRatio: 0.5,
-		order:           "start-first",
+		order:           string(swarm.UpdateOrderStartFirst),
 	}
 
 	service, err := o.ToService(context.Background(), &fakeClient{}, flags)
@@ -291,18 +338,18 @@ func TestToServiceUpdateRollback(t *testing.T) {
 
 func TestToServiceUpdateRollbackOrder(t *testing.T) {
 	flags := newCreateCommand(nil).Flags()
-	flags.Set("update-order", "start-first")
-	flags.Set("rollback-order", "start-first")
+	flags.Set("update-order", string(swarm.UpdateOrderStartFirst))
+	flags.Set("rollback-order", string(swarm.UpdateOrderStartFirst))
 
 	o := newServiceOptions()
 	o.mode = "replicated"
-	o.update = updateOptions{order: "start-first"}
-	o.rollback = updateOptions{order: "start-first"}
+	o.update = updateOptions{order: string(swarm.UpdateOrderStartFirst)}
+	o.rollback = updateOptions{order: string(swarm.UpdateOrderStartFirst)}
 
 	service, err := o.ToService(context.Background(), &fakeClient{}, flags)
 	assert.NilError(t, err)
-	assert.Check(t, is.Equal(service.UpdateConfig.Order, o.update.order))
-	assert.Check(t, is.Equal(service.RollbackConfig.Order, o.rollback.order))
+	assert.Check(t, is.Equal(string(service.UpdateConfig.Order), o.update.order))
+	assert.Check(t, is.Equal(string(service.RollbackConfig.Order), o.rollback.order))
 }
 
 func TestToServiceMaxReplicasGlobalModeConflict(t *testing.T) {
@@ -325,4 +372,50 @@ func TestToServiceSysCtls(t *testing.T) {
 	service, err := o.ToService(context.Background(), &fakeClient{}, flags)
 	assert.NilError(t, err)
 	assert.Check(t, is.DeepEqual(service.TaskTemplate.ContainerSpec.Sysctls, expected))
+}
+
+func TestMakeEnv(t *testing.T) {
+	tests := []struct {
+		doc      string
+		env      []string
+		expected []string
+	}{
+		{
+			doc:      "no duplicates",
+			env:      []string{"one=1", "two=2"},
+			expected: []string{"one=1", "two=2"},
+		},
+		{
+			doc:      "same variable repeated",
+			env:      []string{"one=1", "one=1"},
+			expected: []string{"one=1"},
+		},
+		{
+			doc:      "same variable repeated, then overridden",
+			env:      []string{"one=1", "one=1", "one=2"},
+			expected: []string{"one=2"},
+		},
+		{
+			doc:      "repeated variable last",
+			env:      []string{"one=1", "two=2", "two=2"},
+			expected: []string{"one=1", "two=2"},
+		},
+		{
+			doc:      "last value wins",
+			env:      []string{"one=1", "two=2", "one=3"},
+			expected: []string{"two=2", "one=3"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.doc, func(t *testing.T) {
+			o := newServiceOptions()
+			for _, env := range tc.env {
+				assert.NilError(t, o.env.Set(env))
+			}
+			actual, err := o.makeEnv()
+			assert.NilError(t, err)
+			assert.Check(t, is.DeepEqual(tc.expected, actual))
+		})
+	}
 }

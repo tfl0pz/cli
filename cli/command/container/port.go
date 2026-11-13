@@ -1,15 +1,21 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package container
 
 import (
 	"context"
 	"fmt"
 	"net"
+	"slices"
 	"strings"
 
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
-	"github.com/docker/go-connections/nat"
-	"github.com/pkg/errors"
+	"github.com/docker/cli/cli/command/completion"
+	"github.com/fvbommel/sortorder"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -19,8 +25,8 @@ type portOptions struct {
 	port string
 }
 
-// NewPortCommand creates a new cobra.Command for `docker port`
-func NewPortCommand(dockerCli command.Cli) *cobra.Command {
+// newPortCommand creates a new cobra.Command for "docker container port".
+func newPortCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts portOptions
 
 	cmd := &cobra.Command{
@@ -32,47 +38,53 @@ func NewPortCommand(dockerCli command.Cli) *cobra.Command {
 			if len(args) > 1 {
 				opts.port = args[1]
 			}
-			return runPort(dockerCli, &opts)
+			return runPort(cmd.Context(), dockerCLI, &opts)
 		},
+		Annotations: map[string]string{
+			"aliases": "docker container port, docker port",
+		},
+		ValidArgsFunction:     completion.ContainerNames(dockerCLI, false),
+		DisableFlagsInUseLine: true,
 	}
 	return cmd
 }
 
-func runPort(dockerCli command.Cli, opts *portOptions) error {
-	ctx := context.Background()
-
-	c, err := dockerCli.Client().ContainerInspect(ctx, opts.container)
+// runPort shows the port mapping for a given container. Optionally, it
+// allows showing the mapping for a specific (container)port and proto.
+//
+// TODO(thaJeztah): currently this defaults to show the TCP port if no
+// proto is specified. We should consider changing this to "any" protocol
+// for the given private port.
+func runPort(ctx context.Context, dockerCli command.Cli, opts *portOptions) error {
+	c, err := dockerCli.Client().ContainerInspect(ctx, opts.container, client.ContainerInspectOptions{})
 	if err != nil {
 		return err
 	}
 
+	var out []string
 	if opts.port != "" {
-		port := opts.port
-		proto := "tcp"
-		parts := strings.SplitN(port, "/", 2)
-
-		if len(parts) == 2 && len(parts[1]) != 0 {
-			port = parts[0]
-			proto = parts[1]
-		}
-		natPort := port + "/" + proto
-		newP, err := nat.NewPort(proto, port)
+		port, err := network.ParsePort(opts.port)
 		if err != nil {
 			return err
 		}
-		if frontends, exists := c.NetworkSettings.Ports[newP]; exists && frontends != nil {
-			for _, frontend := range frontends {
-				fmt.Fprintln(dockerCli.Out(), net.JoinHostPort(frontend.HostIP, frontend.HostPort))
-			}
-			return nil
+		frontends, exists := c.Container.NetworkSettings.Ports[port]
+		if !exists || len(frontends) == 0 {
+			return fmt.Errorf("no public port '%s' published for %s", opts.port, opts.container)
 		}
-		return errors.Errorf("Error: No public port '%s' published for %s", natPort, opts.container)
+		for _, frontend := range frontends {
+			out = append(out, net.JoinHostPort(frontend.HostIP.String(), frontend.HostPort))
+		}
+	} else {
+		for from, frontends := range c.Container.NetworkSettings.Ports {
+			for _, frontend := range frontends {
+				out = append(out, fmt.Sprintf("%s -> %s", from, net.JoinHostPort(frontend.HostIP.String(), frontend.HostPort)))
+			}
+		}
 	}
 
-	for from, frontends := range c.NetworkSettings.Ports {
-		for _, frontend := range frontends {
-			fmt.Fprintf(dockerCli.Out(), "%s -> %s\n", from, net.JoinHostPort(frontend.HostIP, frontend.HostPort))
-		}
+	if len(out) > 0 {
+		slices.SortFunc(out, sortorder.NaturalCompare)
+		_, _ = fmt.Fprintln(dockerCli.Out(), strings.Join(out, "\n"))
 	}
 
 	return nil

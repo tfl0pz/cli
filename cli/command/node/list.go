@@ -1,15 +1,20 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package node
 
 import (
 	"context"
-	"sort"
+	"slices"
 
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/formatter"
+	flagsHelper "github.com/docker/cli/cli/flags"
 	"github.com/docker/cli/opts"
-	"github.com/docker/docker/api/types"
 	"github.com/fvbommel/sortorder"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -19,7 +24,7 @@ type listOptions struct {
 	filter opts.FilterOpt
 }
 
-func newListCommand(dockerCli command.Cli) *cobra.Command {
+func newListCommand(dockerCLI command.Cli) *cobra.Command {
 	options := listOptions{filter: opts.NewFilterOpt()}
 
 	cmd := &cobra.Command{
@@ -28,32 +33,33 @@ func newListCommand(dockerCli command.Cli) *cobra.Command {
 		Short:   "List nodes in the swarm",
 		Args:    cli.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runList(dockerCli, options)
+			return runList(cmd.Context(), dockerCLI, options)
 		},
+		ValidArgsFunction:     cobra.NoFileCompletions,
+		DisableFlagsInUseLine: true,
 	}
 	flags := cmd.Flags()
 	flags.BoolVarP(&options.quiet, "quiet", "q", false, "Only display IDs")
-	flags.StringVar(&options.format, "format", "", "Pretty-print nodes using a Go template")
+	flags.StringVar(&options.format, "format", "", flagsHelper.FormatHelp)
 	flags.VarP(&options.filter, "filter", "f", "Filter output based on conditions provided")
 
 	return cmd
 }
 
-func runList(dockerCli command.Cli, options listOptions) error {
-	client := dockerCli.Client()
-	ctx := context.Background()
+func runList(ctx context.Context, dockerCLI command.Cli, options listOptions) error {
+	apiClient := dockerCLI.Client()
 
-	nodes, err := client.NodeList(
-		ctx,
-		types.NodeListOptions{Filters: options.filter.Value()})
+	res, err := apiClient.NodeList(ctx, client.NodeListOptions{
+		Filters: options.filter.Value(),
+	})
 	if err != nil {
 		return err
 	}
 
-	info := types.Info{}
-	if len(nodes) > 0 && !options.quiet {
+	var info client.SystemInfoResult
+	if len(res.Items) > 0 && !options.quiet {
 		// only non-empty nodes and not quiet, should we call /info api
-		info, err = client.Info(ctx)
+		info, err = apiClient.Info(ctx, client.InfoOptions{})
 		if err != nil {
 			return err
 		}
@@ -62,17 +68,17 @@ func runList(dockerCli command.Cli, options listOptions) error {
 	format := options.format
 	if len(format) == 0 {
 		format = formatter.TableFormatKey
-		if len(dockerCli.ConfigFile().NodesFormat) > 0 && !options.quiet {
-			format = dockerCli.ConfigFile().NodesFormat
+		if len(dockerCLI.ConfigFile().NodesFormat) > 0 && !options.quiet {
+			format = dockerCLI.ConfigFile().NodesFormat
 		}
 	}
 
 	nodesCtx := formatter.Context{
-		Output: dockerCli.Out(),
-		Format: NewFormat(format, options.quiet),
+		Output: dockerCLI.Out(),
+		Format: newFormat(format, options.quiet),
 	}
-	sort.Slice(nodes, func(i, j int) bool {
-		return sortorder.NaturalLess(nodes[i].Description.Hostname, nodes[j].Description.Hostname)
+	slices.SortFunc(res.Items, func(a, b swarm.Node) int {
+		return sortorder.NaturalCompare(a.Description.Hostname, b.Description.Hostname)
 	})
-	return FormatWrite(nodesCtx, nodes, info)
+	return formatWrite(nodesCtx, res, info)
 }

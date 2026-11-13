@@ -1,15 +1,20 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package secret
 
 import (
 	"context"
-	"sort"
+	"slices"
 
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/formatter"
+	flagsHelper "github.com/docker/cli/cli/flags"
 	"github.com/docker/cli/opts"
-	"github.com/docker/docker/api/types"
 	"github.com/fvbommel/sortorder"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -19,7 +24,7 @@ type listOptions struct {
 	filter opts.FilterOpt
 }
 
-func newSecretListCommand(dockerCli command.Cli) *cobra.Command {
+func newSecretListCommand(dockerCLI command.Cli) *cobra.Command {
 	options := listOptions{filter: opts.NewFilterOpt()}
 
 	cmd := &cobra.Command{
@@ -28,42 +33,43 @@ func newSecretListCommand(dockerCli command.Cli) *cobra.Command {
 		Short:   "List secrets",
 		Args:    cli.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSecretList(dockerCli, options)
+			return runSecretList(cmd.Context(), dockerCLI, options)
 		},
+		ValidArgsFunction:     cobra.NoFileCompletions,
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
 	flags.BoolVarP(&options.quiet, "quiet", "q", false, "Only display IDs")
-	flags.StringVarP(&options.format, "format", "", "", "Pretty-print secrets using a Go template")
+	flags.StringVar(&options.format, "format", "", flagsHelper.FormatHelp)
 	flags.VarP(&options.filter, "filter", "f", "Filter output based on conditions provided")
 
 	return cmd
 }
 
-func runSecretList(dockerCli command.Cli, options listOptions) error {
-	client := dockerCli.Client()
-	ctx := context.Background()
+func runSecretList(ctx context.Context, dockerCLI command.Cli, options listOptions) error {
+	apiClient := dockerCLI.Client()
 
-	secrets, err := client.SecretList(ctx, types.SecretListOptions{Filters: options.filter.Value()})
+	res, err := apiClient.SecretList(ctx, client.SecretListOptions{Filters: options.filter.Value()})
 	if err != nil {
 		return err
 	}
 	format := options.format
 	if len(format) == 0 {
-		if len(dockerCli.ConfigFile().SecretFormat) > 0 && !options.quiet {
-			format = dockerCli.ConfigFile().SecretFormat
+		if len(dockerCLI.ConfigFile().SecretFormat) > 0 && !options.quiet {
+			format = dockerCLI.ConfigFile().SecretFormat
 		} else {
 			format = formatter.TableFormatKey
 		}
 	}
 
-	sort.Slice(secrets, func(i, j int) bool {
-		return sortorder.NaturalLess(secrets[i].Spec.Name, secrets[j].Spec.Name)
+	slices.SortFunc(res.Items, func(a, b swarm.Secret) int {
+		return sortorder.NaturalCompare(a.Spec.Name, b.Spec.Name)
 	})
 
 	secretCtx := formatter.Context{
-		Output: dockerCli.Out(),
-		Format: NewFormat(format, options.quiet),
+		Output: dockerCLI.Out(),
+		Format: newFormat(format, options.quiet),
 	}
-	return FormatWrite(secretCtx, secrets)
+	return formatWrite(secretCtx, res)
 }

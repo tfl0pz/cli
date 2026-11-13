@@ -1,14 +1,42 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package manifest
 
 import (
+	"context"
 	"fmt"
+	"path/filepath"
+	"slices"
 
+	"github.com/containerd/errdefs"
+	"github.com/containerd/platforms"
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
+	"github.com/docker/cli/cli/command/completion"
+	"github.com/docker/cli/cli/config"
 	"github.com/docker/cli/cli/manifest/store"
+	"github.com/docker/cli/internal/registryclient"
+	"github.com/moby/moby/api/types/registry"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
+)
+
+var (
+	// similar to https://github.com/containerd/platforms/blob/v1.0.0-rc.5/database.go#L29-L38
+	knownOSes = []string{
+		"aix", "android", "darwin", "dragonfly", "freebsd", "hurd", "illumos",
+		"ios", "js", "linux", "nacl", "netbsd", "openbsd", "plan9", "solaris",
+		"windows", "zos",
+	}
+
+	// similar to https://github.com/containerd/platforms/blob/v1.0.0-rc.5/database.go#L51-L60
+	knownArches = []string{
+		"386", "amd64", "amd64p32", "arm", "armbe", "arm64", "arm64be", "ppc64",
+		"ppc64le", "loong64", "mips", "mipsle", "mips64", "mips64le", "mips64p32",
+		"mips64p32le", "ppc", "riscv", "riscv64", "s390", "s390x", "sparc",
+		"sparc64", "wasm",
+	}
 )
 
 type annotateOptions struct {
@@ -21,8 +49,51 @@ type annotateOptions struct {
 	osVersion  string
 }
 
+// manifestStoreProvider is used in tests to provide a dummy store.
+type manifestStoreProvider interface {
+	// ManifestStore returns a store for local manifests
+	ManifestStore() store.Store
+	RegistryClient(bool) registryclient.RegistryClient
+}
+
+// newManifestStore returns a store for local manifests
+func newManifestStore(dockerCLI command.Cli) store.Store {
+	if msp, ok := dockerCLI.(manifestStoreProvider); ok {
+		// manifestStoreProvider is used in tests to provide a dummy store.
+		return msp.ManifestStore()
+	}
+
+	// TODO: support override default location from config file
+	return store.NewStore(filepath.Join(config.Dir(), "manifests"))
+}
+
+// newRegistryClient returns a client for communicating with a Docker distribution
+// registry
+func newRegistryClient(dockerCLI command.Cli, allowInsecure bool) registryclient.RegistryClient {
+	if msp, ok := dockerCLI.(manifestStoreProvider); ok {
+		// manifestStoreProvider is used in tests to provide a dummy store.
+		return msp.RegistryClient(allowInsecure)
+	}
+	cfg := dockerCLI.ConfigFile()
+	resolver := func(ctx context.Context, domainName string) registry.AuthConfig {
+		a, _ := cfg.GetAuthConfig(domainName)
+		return registry.AuthConfig{
+			Username:      a.Username,
+			Password:      a.Password,
+			ServerAddress: a.ServerAddress,
+
+			// TODO(thaJeztah): Are these expected to be included?
+			Auth:          a.Auth,
+			IdentityToken: a.IdentityToken,
+			RegistryToken: a.RegistryToken,
+		}
+	}
+	// FIXME(thaJeztah): this should use the userAgent as configured on the dockerCLI.
+	return registryclient.NewRegistryClient(resolver, command.UserAgent(), allowInsecure)
+}
+
 // NewAnnotateCommand creates a new `docker manifest annotate` command
-func newAnnotateCommand(dockerCli command.Cli) *cobra.Command {
+func newAnnotateCommand(dockerCLI command.Cli) *cobra.Command {
 	var opts annotateOptions
 
 	cmd := &cobra.Command{
@@ -32,8 +103,9 @@ func newAnnotateCommand(dockerCli command.Cli) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts.target = args[0]
 			opts.image = args[1]
-			return runManifestAnnotate(dockerCli, opts)
+			return runManifestAnnotate(dockerCLI, opts)
 		},
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -44,23 +116,25 @@ func newAnnotateCommand(dockerCli command.Cli) *cobra.Command {
 	flags.StringSliceVar(&opts.osFeatures, "os-features", []string{}, "Set operating system feature")
 	flags.StringVar(&opts.variant, "variant", "", "Set architecture variant")
 
+	_ = cmd.RegisterFlagCompletionFunc("os", completion.FromList(knownOSes...))
+	_ = cmd.RegisterFlagCompletionFunc("arch", completion.FromList(knownArches...))
 	return cmd
 }
 
-func runManifestAnnotate(dockerCli command.Cli, opts annotateOptions) error {
+func runManifestAnnotate(dockerCLI command.Cli, opts annotateOptions) error {
 	targetRef, err := normalizeReference(opts.target)
 	if err != nil {
-		return errors.Wrapf(err, "annotate: error parsing name for manifest list %s", opts.target)
+		return fmt.Errorf("annotate: error parsing name for manifest list %s: %w", opts.target, err)
 	}
 	imgRef, err := normalizeReference(opts.image)
 	if err != nil {
-		return errors.Wrapf(err, "annotate: error parsing name for manifest %s", opts.image)
+		return fmt.Errorf("annotate: error parsing name for manifest %s: %w", opts.image, err)
 	}
 
-	manifestStore := dockerCli.ManifestStore()
+	manifestStore := newManifestStore(dockerCLI)
 	imageManifest, err := manifestStore.Get(targetRef, imgRef)
 	switch {
-	case store.IsNotFound(err):
+	case errdefs.IsNotFound(err):
 		return fmt.Errorf("manifest for image %s does not exist in %s", opts.image, opts.target)
 	case err != nil:
 		return err
@@ -86,17 +160,22 @@ func runManifestAnnotate(dockerCli command.Cli, opts annotateOptions) error {
 		imageManifest.Descriptor.Platform.OSVersion = opts.osVersion
 	}
 
-	if !isValidOSArch(imageManifest.Descriptor.Platform.OS, imageManifest.Descriptor.Platform.Architecture) {
-		return errors.Errorf("manifest entry for image has unsupported os/arch combination: %s/%s", opts.os, opts.arch)
+	// Validate platform syntax, without restricting OS/architecture combinations.
+	//
+	// TODO(thaJeztah): Implement a platforms.Validate in containerd/platforms and replace this code.
+	p := imageManifest.Descriptor.Platform
+	if p.OS == "" || p.Architecture == "" {
+		return fmt.Errorf("manifest entry for image has missing os/architecture: %q/%q", p.OS, p.Architecture)
+	}
+	if _, err := platforms.Parse(platforms.FormatAll(*p)); err != nil {
+		return fmt.Errorf("manifest entry for image has invalid platform: %w", err)
 	}
 	return manifestStore.Save(targetRef, imgRef, imageManifest)
 }
 
 func appendIfUnique(list []string, str string) []string {
-	for _, s := range list {
-		if s == str {
-			return list
-		}
+	if slices.Contains(list, str) {
+		return list
 	}
 	return append(list, str)
 }

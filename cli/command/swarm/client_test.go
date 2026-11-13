@@ -3,83 +3,85 @@ package swarm
 import (
 	"context"
 
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/client"
+	"github.com/moby/moby/api/types/system"
+	"github.com/moby/moby/client"
 )
 
 type fakeClient struct {
 	client.Client
-	infoFunc              func() (types.Info, error)
-	swarmInitFunc         func() (string, error)
-	swarmInspectFunc      func() (swarm.Swarm, error)
-	nodeInspectFunc       func() (swarm.Node, []byte, error)
-	swarmGetUnlockKeyFunc func() (types.SwarmUnlockKeyResponse, error)
-	swarmJoinFunc         func() error
-	swarmLeaveFunc        func() error
-	swarmUpdateFunc       func(swarm swarm.Spec, flags swarm.UpdateFlags) error
-	swarmUnlockFunc       func(req swarm.UnlockRequest) error
+	infoFunc              func() (system.Info, error)
+	swarmInitFunc         func(client.SwarmInitOptions) (client.SwarmInitResult, error)
+	swarmInspectFunc      func() (client.SwarmInspectResult, error)
+	nodeInspectFunc       func() (client.NodeInspectResult, error)
+	swarmGetUnlockKeyFunc func() (client.SwarmGetUnlockKeyResult, error)
+	swarmJoinFunc         func() (client.SwarmJoinResult, error)
+	swarmLeaveFunc        func() (client.SwarmLeaveResult, error)
+	swarmUpdateFunc       func(client.SwarmUpdateOptions) (client.SwarmUpdateResult, error)
+	swarmUnlockFunc       func(client.SwarmUnlockOptions) (client.SwarmUnlockResult, error)
 }
 
-func (cli *fakeClient) Info(ctx context.Context) (types.Info, error) {
+func (cli *fakeClient) Info(context.Context, client.InfoOptions) (client.SystemInfoResult, error) {
 	if cli.infoFunc != nil {
-		return cli.infoFunc()
+		inf, err := cli.infoFunc()
+		return client.SystemInfoResult{
+			Info: inf,
+		}, err
 	}
-	return types.Info{}, nil
+	return client.SystemInfoResult{}, nil
 }
 
-func (cli *fakeClient) NodeInspectWithRaw(ctx context.Context, ref string) (swarm.Node, []byte, error) {
+func (cli *fakeClient) NodeInspect(context.Context, string, client.NodeInspectOptions) (client.NodeInspectResult, error) {
 	if cli.nodeInspectFunc != nil {
 		return cli.nodeInspectFunc()
 	}
-	return swarm.Node{}, []byte{}, nil
+	return client.NodeInspectResult{}, nil
 }
 
-func (cli *fakeClient) SwarmInit(ctx context.Context, req swarm.InitRequest) (string, error) {
+func (cli *fakeClient) SwarmInit(_ context.Context, options client.SwarmInitOptions) (client.SwarmInitResult, error) {
 	if cli.swarmInitFunc != nil {
-		return cli.swarmInitFunc()
+		return cli.swarmInitFunc(options)
 	}
-	return "", nil
+	return client.SwarmInitResult{}, nil
 }
 
-func (cli *fakeClient) SwarmInspect(ctx context.Context) (swarm.Swarm, error) {
+func (cli *fakeClient) SwarmInspect(context.Context, client.SwarmInspectOptions) (client.SwarmInspectResult, error) {
 	if cli.swarmInspectFunc != nil {
 		return cli.swarmInspectFunc()
 	}
-	return swarm.Swarm{}, nil
+	return client.SwarmInspectResult{}, nil
 }
 
-func (cli *fakeClient) SwarmGetUnlockKey(ctx context.Context) (types.SwarmUnlockKeyResponse, error) {
+func (cli *fakeClient) SwarmGetUnlockKey(ctx context.Context) (client.SwarmGetUnlockKeyResult, error) {
 	if cli.swarmGetUnlockKeyFunc != nil {
 		return cli.swarmGetUnlockKeyFunc()
 	}
-	return types.SwarmUnlockKeyResponse{}, nil
+	return client.SwarmGetUnlockKeyResult{}, nil
 }
 
-func (cli *fakeClient) SwarmJoin(ctx context.Context, req swarm.JoinRequest) error {
+func (cli *fakeClient) SwarmJoin(context.Context, client.SwarmJoinOptions) (client.SwarmJoinResult, error) {
 	if cli.swarmJoinFunc != nil {
 		return cli.swarmJoinFunc()
 	}
-	return nil
+	return client.SwarmJoinResult{}, nil
 }
 
-func (cli *fakeClient) SwarmLeave(ctx context.Context, force bool) error {
+func (cli *fakeClient) SwarmLeave(context.Context, client.SwarmLeaveOptions) (client.SwarmLeaveResult, error) {
 	if cli.swarmLeaveFunc != nil {
 		return cli.swarmLeaveFunc()
 	}
-	return nil
+	return client.SwarmLeaveResult{}, nil
 }
 
-func (cli *fakeClient) SwarmUpdate(ctx context.Context, version swarm.Version, swarm swarm.Spec, flags swarm.UpdateFlags) error {
+func (cli *fakeClient) SwarmUpdate(_ context.Context, options client.SwarmUpdateOptions) (client.SwarmUpdateResult, error) {
 	if cli.swarmUpdateFunc != nil {
-		return cli.swarmUpdateFunc(swarm, flags)
+		return cli.swarmUpdateFunc(options)
 	}
-	return nil
+	return client.SwarmUpdateResult{}, nil
 }
 
-func (cli *fakeClient) SwarmUnlock(ctx context.Context, req swarm.UnlockRequest) error {
+func (cli *fakeClient) SwarmUnlock(_ context.Context, options client.SwarmUnlockOptions) (client.SwarmUnlockResult, error) {
 	if cli.swarmUnlockFunc != nil {
-		return cli.swarmUnlockFunc(req)
+		return cli.swarmUnlockFunc(options)
 	}
-	return nil
+	return client.SwarmUnlockResult{}, nil
 }

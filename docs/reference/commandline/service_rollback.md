@@ -1,28 +1,23 @@
----
-title: "service rollback"
-description: "The service rollback command description and usage"
-keywords: "service, rollback"
----
-
 # service rollback
 
-```markdown
-Usage:  docker service rollback SERVICE
-
+<!---MARKER_GEN_START-->
 Revert changes to a service's configuration
 
-Options:
-  -d, --detach       Exit immediately instead of waiting for the service to converge (default true)
-      --help         Print usage
-  -q, --quiet        Suppress progress output
-```
+### Options
+
+| Name             | Type   | Default | Description                                                     |
+|:-----------------|:-------|:--------|:----------------------------------------------------------------|
+| `-d`, `--detach` | `bool` |         | Exit immediately instead of waiting for the service to converge |
+| `-q`, `--quiet`  | `bool` |         | Suppress progress output                                        |
+
+
+<!---MARKER_GEN_END-->
 
 ## Description
 
 Roll back a specified service to its previous version from the swarm.
 
-> **Note**
->
+> [!NOTE]
 > This is a cluster management command, and must be executed on a swarm
 > manager node. To learn about managers and workers, refer to the
 > [Swarm mode section](https://docs.docker.com/engine/swarm/) in the

@@ -6,51 +6,107 @@ import (
 	"testing"
 
 	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 )
 
 func TestValidateIPAddress(t *testing.T) {
-	if ret, err := ValidateIPAddress(`1.2.3.4`); err != nil || ret == "" {
-		t.Fatalf("ValidateIPAddress(`1.2.3.4`) got %s %s", ret, err)
+	tests := []struct {
+		doc         string
+		input       string
+		expectedOut string
+		expectedErr string
+	}{
+		{
+			doc:         "IPv4 loopback",
+			input:       `127.0.0.1`,
+			expectedOut: `127.0.0.1`,
+		},
+		{
+			doc:         "IPv4 loopback with whitespace",
+			input:       ` 127.0.0.1 `,
+			expectedOut: `127.0.0.1`,
+		},
+		{
+			doc:         "IPv6 loopback long form",
+			input:       `0:0:0:0:0:0:0:1`,
+			expectedOut: `::1`,
+		},
+		{
+			doc:         "IPv6 loopback",
+			input:       `::1`,
+			expectedOut: `::1`,
+		},
+		{
+			doc:         "IPv6 loopback with whitespace",
+			input:       ` ::1 `,
+			expectedOut: `::1`,
+		},
+		{
+			doc:         "IPv6 lowercase",
+			input:       `2001:db8::68`,
+			expectedOut: `2001:db8::68`,
+		},
+		{
+			doc:         "IPv6 uppercase",
+			input:       `2001:DB8::68`,
+			expectedOut: `2001:db8::68`,
+		},
+		{
+			doc:         "IPv6 with brackets",
+			input:       `[::1]`,
+			expectedErr: `IP address is not correctly formatted: [::1]`,
+		},
+		{
+			doc:         "IPv4 partial",
+			input:       `127`,
+			expectedErr: `IP address is not correctly formatted: 127`,
+		},
+		{
+			doc:         "random invalid string",
+			input:       `random invalid string`,
+			expectedErr: `IP address is not correctly formatted: random invalid string`,
+		},
 	}
 
-	if ret, err := ValidateIPAddress(`127.0.0.1`); err != nil || ret == "" {
-		t.Fatalf("ValidateIPAddress(`127.0.0.1`) got %s %s", ret, err)
+	for _, tc := range tests {
+		t.Run(tc.input, func(t *testing.T) {
+			actualOut, actualErr := ValidateIPAddress(tc.input)
+			assert.Check(t, is.Equal(tc.expectedOut, actualOut))
+			if tc.expectedErr == "" {
+				assert.Check(t, actualErr)
+			} else {
+				assert.Check(t, is.Error(actualErr, tc.expectedErr))
+			}
+		})
 	}
-
-	if ret, err := ValidateIPAddress(`::1`); err != nil || ret == "" {
-		t.Fatalf("ValidateIPAddress(`::1`) got %s %s", ret, err)
-	}
-
-	if ret, err := ValidateIPAddress(`127`); err == nil || ret != "" {
-		t.Fatalf("ValidateIPAddress(`127`) got %s %s", ret, err)
-	}
-
-	if ret, err := ValidateIPAddress(`random invalid string`); err == nil || ret != "" {
-		t.Fatalf("ValidateIPAddress(`random invalid string`) got %s %s", ret, err)
-	}
-
 }
 
 func TestMapOpts(t *testing.T) {
 	tmpMap := make(map[string]string)
-	o := NewMapOpts(tmpMap, logOptsValidator)
-	o.Set("max-size=1")
-	if o.String() != "map[max-size:1]" {
-		t.Errorf("%s != [map[max-size:1]", o.String())
+	o := NewMapOpts(tmpMap, sampleValidator)
+	err := o.Set("valid-option=1")
+	if err != nil {
+		t.Error(err)
+	}
+	if o.String() != "map[valid-option:1]" {
+		t.Errorf("%s != [map[valid-option:1]", o.String())
 	}
 
-	o.Set("max-file=2")
+	err = o.Set("valid-option2=2")
+	if err != nil {
+		t.Error(err)
+	}
 	if len(tmpMap) != 2 {
 		t.Errorf("map length %d != 2", len(tmpMap))
 	}
 
-	if tmpMap["max-file"] != "2" {
-		t.Errorf("max-file = %s != 2", tmpMap["max-file"])
+	if tmpMap["valid-option"] != "1" {
+		t.Errorf("valid-option = %s != 1", tmpMap["valid-option"])
+	}
+	if tmpMap["valid-option2"] != "2" {
+		t.Errorf("valid-option2 = %s != 2", tmpMap["valid-option2"])
 	}
 
-	if tmpMap["max-size"] != "1" {
-		t.Errorf("max-size = %s != 1", tmpMap["max-size"])
-	}
 	if o.Set("dummy-val=3") == nil {
 		t.Error("validator is not being called")
 	}
@@ -58,67 +114,75 @@ func TestMapOpts(t *testing.T) {
 
 func TestListOptsWithoutValidator(t *testing.T) {
 	o := NewListOpts(nil)
-	o.Set("foo")
+	err := o.Set("foo")
+	if err != nil {
+		t.Error(err)
+	}
 	if o.String() != "[foo]" {
 		t.Errorf("%s != [foo]", o.String())
 	}
-	o.Set("bar")
+	err = o.Set("bar")
+	if err != nil {
+		t.Error(err)
+	}
 	if o.Len() != 2 {
 		t.Errorf("%d != 2", o.Len())
 	}
-	o.Set("bar")
+	err = o.Set("bar")
+	if err != nil {
+		t.Error(err)
+	}
 	if o.Len() != 3 {
 		t.Errorf("%d != 3", o.Len())
 	}
 	if !o.Get("bar") {
-		t.Error("o.Get(\"bar\") == false")
+		t.Error(`o.Get("bar") == false`)
 	}
 	if o.Get("baz") {
-		t.Error("o.Get(\"baz\") == true")
+		t.Error(`o.Get("baz") == true`)
 	}
-	o.Delete("foo")
-	if o.String() != "[bar bar]" {
-		t.Errorf("%s != [bar bar]", o.String())
+	if listOpts := o.GetSlice(); len(listOpts) != 3 || listOpts[0] != "foo" || listOpts[1] != "bar" || listOpts[2] != "bar" {
+		t.Errorf("Expected [[foo bar bar]], got [%v]", listOpts)
 	}
-	listOpts := o.GetAll()
-	if len(listOpts) != 2 || listOpts[0] != "bar" || listOpts[1] != "bar" {
-		t.Errorf("Expected [[bar bar]], got [%v]", listOpts)
+	if mapListOpts := o.GetMap(); len(mapListOpts) != 2 {
+		t.Errorf("Expected [map[bar:{} foo:{}]], got [%v]", mapListOpts)
 	}
-	mapListOpts := o.GetMap()
-	if len(mapListOpts) != 1 {
-		t.Errorf("Expected [map[bar:{}]], got [%v]", mapListOpts)
-	}
-
 }
 
 func TestListOptsWithValidator(t *testing.T) {
-	// Re-using logOptsvalidator (used by MapOpts)
-	o := NewListOpts(logOptsValidator)
-	o.Set("foo")
+	o := NewListOpts(sampleValidator)
+	err := o.Set("foo")
+	if err == nil {
+		t.Error(err)
+	}
 	if o.String() != "" {
 		t.Errorf(`%s != ""`, o.String())
 	}
-	o.Set("foo=bar")
+	err = o.Set("foo=bar")
+	if err == nil {
+		t.Error(err)
+	}
 	if o.String() != "" {
 		t.Errorf(`%s != ""`, o.String())
 	}
-	o.Set("max-file=2")
+	err = o.Set("valid-option2=2")
+	if err != nil {
+		t.Error(err)
+	}
 	if o.Len() != 1 {
 		t.Errorf("%d != 1", o.Len())
 	}
-	if !o.Get("max-file=2") {
-		t.Error("o.Get(\"max-file=2\") == false")
+	if !o.Get("valid-option2=2") {
+		t.Error(`o.Get("valid-option2=2") == false`)
 	}
 	if o.Get("baz") {
-		t.Error("o.Get(\"baz\") == true")
+		t.Error(`o.Get("baz") == true`)
 	}
-	o.Delete("max-file=2")
-	if o.String() != "" {
-		t.Errorf(`%s != ""`, o.String())
+	if expected := "[valid-option2=2]"; o.String() != expected {
+		t.Errorf(`%s != %q`, o.String(), expected)
 	}
 }
 
-// nolint: lll
 func TestValidateDNSSearch(t *testing.T) {
 	valid := []string{
 		`.`,
@@ -160,7 +224,11 @@ func TestValidateDNSSearch(t *testing.T) {
 		`foo.bar-.baz`,
 		`foo.-bar`,
 		`foo.-bar.baz`,
-		`foo.bar.baz.this.should.fail.on.long.name.because.it.is.longer.thanisshouldbethis.should.fail.on.long.name.because.it.is.longer.thanisshouldbethis.should.fail.on.long.name.because.it.is.longer.thanisshouldbethis.should.fail.on.long.name.because.it.is.longer.thanisshouldbe`,
+		`foo.bar.baz.` +
+			`this.should.fail.on.long.name.because.it.is.longer.thanisshouldbe` +
+			`this.should.fail.on.long.name.because.it.is.longer.thanisshouldbe` +
+			`this.should.fail.on.long.name.because.it.is.longer.thanisshouldbe` +
+			`this.should.fail.on.long.name.because.it.is.longer.thanisshouldbe`,
 	}
 
 	for _, domain := range valid {
@@ -266,7 +334,6 @@ func TestValidateLabel(t *testing.T) {
 	}
 
 	for _, tc := range tests {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			val, err := ValidateLabel(tc.value)
 			if tc.expectedErr != "" {
@@ -279,59 +346,13 @@ func TestValidateLabel(t *testing.T) {
 	}
 }
 
-func logOptsValidator(val string) (string, error) {
-	allowedKeys := map[string]string{"max-size": "1", "max-file": "2"}
-	vals := strings.Split(val, "=")
-	if allowedKeys[vals[0]] != "" {
+func sampleValidator(val string) (string, error) {
+	allowedKeys := map[string]string{"valid-option": "1", "valid-option2": "2"}
+	k, _, _ := strings.Cut(val, "=")
+	if allowedKeys[k] != "" {
 		return val, nil
 	}
-	return "", fmt.Errorf("invalid key %s", vals[0])
-}
-
-func TestNamedListOpts(t *testing.T) {
-	var v []string
-	o := NewNamedListOptsRef("foo-name", &v, nil)
-
-	o.Set("foo")
-	if o.String() != "[foo]" {
-		t.Errorf("%s != [foo]", o.String())
-	}
-	if o.Name() != "foo-name" {
-		t.Errorf("%s != foo-name", o.Name())
-	}
-	if len(v) != 1 {
-		t.Errorf("expected foo to be in the values, got %v", v)
-	}
-}
-
-func TestNamedMapOpts(t *testing.T) {
-	tmpMap := make(map[string]string)
-	o := NewNamedMapOpts("max-name", tmpMap, nil)
-
-	o.Set("max-size=1")
-	if o.String() != "map[max-size:1]" {
-		t.Errorf("%s != [map[max-size:1]", o.String())
-	}
-	if o.Name() != "max-name" {
-		t.Errorf("%s != max-name", o.Name())
-	}
-	if _, exist := tmpMap["max-size"]; !exist {
-		t.Errorf("expected map-size to be in the values, got %v", tmpMap)
-	}
-}
-
-func TestValidateMACAddress(t *testing.T) {
-	if _, err := ValidateMACAddress(`92:d0:c6:0a:29:33`); err != nil {
-		t.Fatalf("ValidateMACAddress(`92:d0:c6:0a:29:33`) got %s", err)
-	}
-
-	if _, err := ValidateMACAddress(`92:d0:c6:0a:33`); err == nil {
-		t.Fatalf("ValidateMACAddress(`92:d0:c6:0a:33`) succeeded; expected failure on invalid MAC")
-	}
-
-	if _, err := ValidateMACAddress(`random invalid string`); err == nil {
-		t.Fatalf("ValidateMACAddress(`random invalid string`) succeeded; expected failure on invalid MAC")
-	}
+	return "", fmt.Errorf("invalid key %s", k)
 }
 
 func TestValidateLink(t *testing.T) {
@@ -355,10 +376,8 @@ func TestValidateLink(t *testing.T) {
 	for link, expectedError := range invalid {
 		if _, err := ValidateLink(link); err == nil {
 			t.Fatalf("ValidateLink(`%q`) should have failed validation", link)
-		} else {
-			if !strings.Contains(err.Error(), expectedError) {
-				t.Fatalf("ValidateLink(`%q`) error should contain %q", link, expectedError)
-			}
+		} else if !strings.Contains(err.Error(), expectedError) {
+			t.Fatalf("ValidateLink(`%q`) error should contain %q", link, expectedError)
 		}
 	}
 }
@@ -393,4 +412,82 @@ func TestParseLink(t *testing.T) {
 	if _, _, err := ParseLink("link:alias:wrong"); err == nil || !strings.Contains(err.Error(), "bad format for links: link:alias:wrong") {
 		t.Fatalf("Expected error 'bad format for links: link:alias:wrong' but got: %v", err)
 	}
+}
+
+func TestGetAllOrEmptyReturnsNilOrValue(t *testing.T) {
+	opts := NewListOpts(nil)
+	assert.Check(t, is.DeepEqual(opts.GetAllOrEmpty(), []string{}))
+	opts.Set("foo")
+	assert.Check(t, is.DeepEqual(opts.GetAllOrEmpty(), []string{"foo"}))
+}
+
+func TestParseCPUsReturnZeroOnInvalidValues(t *testing.T) {
+	resValue, _ := ParseCPUs("foo")
+	var z1 int64 = 0
+	assert.Equal(t, z1, resValue)
+	resValue, _ = ParseCPUs("1e-32")
+	assert.Equal(t, z1, resValue)
+}
+
+func TestUmaskOpt(t *testing.T) {
+	t.Run("type", func(t *testing.T) {
+		var opt UmaskOpt
+		assert.Equal(t, opt.Type(), "umask")
+	})
+
+	t.Run("nil by default", func(t *testing.T) {
+		var opt UmaskOpt
+		assert.Assert(t, opt.Value() == nil)
+		assert.Equal(t, opt.String(), "<nil>")
+	})
+
+	t.Run("rejects empty string", func(t *testing.T) {
+		var opt UmaskOpt
+		err := opt.Set("")
+		assert.Assert(t, err != nil)
+		assert.Assert(t, opt.Value() == nil)
+		assert.Equal(t, opt.String(), "<nil>")
+	})
+
+	t.Run("parses zero", func(t *testing.T) {
+		var opt UmaskOpt
+		err := opt.Set("0")
+		assert.NilError(t, err)
+		assert.Equal(t, *opt.Value(), uint32(0))
+		assert.Equal(t, opt.String(), "0000")
+	})
+
+	t.Run("parses valid octal values", func(t *testing.T) {
+		var opt UmaskOpt
+		err := opt.Set("022")
+		assert.NilError(t, err)
+		assert.Assert(t, opt.Value() != nil)
+		assert.Equal(t, *opt.Value(), uint32(0o22))
+		assert.Equal(t, opt.String(), "0022")
+	})
+
+	t.Run("rejects octal values with 0o prefix", func(t *testing.T) {
+		var opt UmaskOpt
+		err := opt.Set("0o22")
+		assert.Assert(t, err != nil)
+		assert.Assert(t, opt.Value() == nil)
+		assert.Equal(t, opt.String(), "<nil>")
+	})
+
+	t.Run("parses large octal values", func(t *testing.T) {
+		var opt UmaskOpt
+		err := opt.Set("077777")
+		assert.NilError(t, err)
+		assert.Assert(t, opt.Value() != nil)
+		assert.Equal(t, *opt.Value(), uint32(0o77777))
+		assert.Equal(t, opt.String(), "077777")
+	})
+
+	t.Run("rejects invalid octal values", func(t *testing.T) {
+		var opt UmaskOpt
+		err := opt.Set("9")
+		assert.Assert(t, err != nil)
+		assert.Assert(t, opt.Value() == nil)
+		assert.Equal(t, opt.String(), "<nil>")
+	})
 }

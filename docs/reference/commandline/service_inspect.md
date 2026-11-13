@@ -1,21 +1,17 @@
----
-title: "service inspect"
-description: "The service inspect command description and usage"
-keywords: "service, inspect"
----
-
 # service inspect
 
-```Markdown
-Usage:  docker service inspect [OPTIONS] SERVICE [SERVICE...]
-
+<!---MARKER_GEN_START-->
 Display detailed information on one or more services
 
-Options:
-  -f, --format string   Format the output using the given Go template
-      --help            Print usage
-      --pretty          Print the information in a human friendly format
-```
+### Options
+
+| Name                                   | Type     | Default | Description                                                                                                                                                                                                                                                        |
+|:---------------------------------------|:---------|:--------|:-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| [`-f`](#format), [`--format`](#format) | `string` |         | Format output using a custom template:<br>'json':             Print in JSON format<br>'TEMPLATE':         Print output using the given Go template.<br>Refer to https://docs.docker.com/go/formatting/ for more information about formatting output with templates |
+| [`--pretty`](#pretty)                  | `bool`   |         | Print the information in a human friendly format                                                                                                                                                                                                                   |
+
+
+<!---MARKER_GEN_END-->
 
 ## Description
 
@@ -24,11 +20,10 @@ Inspects the specified service.
 By default, this renders all results in a JSON array. If a format is specified,
 the given template will be executed for each result.
 
-Go's [text/template](http://golang.org/pkg/text/template/) package
+Go's [text/template](https://pkg.go.dev/text/template) package
 describes all the details of the format.
 
-> **Note**
->
+> [!NOTE]
 > This is a cluster management command, and must be executed on a swarm
 > manager node. To learn about managers and workers, refer to the
 > [Swarm mode section](https://docs.docker.com/engine/swarm/) in the
@@ -45,7 +40,7 @@ For example, given the following service;
 ```console
 $ docker service ls
 ID            NAME   MODE        REPLICAS  IMAGE
-dmu1ept4cxcf  redis  replicated  3/3       redis:3.0.6
+dmu1ept4cxcf  redis  replicated  3/3       redis:7.4.1
 ```
 
 Both `docker service inspect redis`, and `docker service inspect dmu1ept4cxcf`
@@ -70,7 +65,7 @@ The output is in JSON format, for example:
       "Name": "redis",
       "TaskTemplate": {
         "ContainerSpec": {
-          "Image": "redis:3.0.6"
+          "Image": "redis:7.4.1"
         },
         "Resources": {
           "Limits": {},
@@ -113,7 +108,7 @@ $ docker service inspect dmu1ept4cxcf
 ]
 ```
 
-### Formatting
+### <a name="pretty"></a> Formatting (--pretty)
 
 You can print the inspect output in a human-readable format instead of the default
 JSON output, by using the `--pretty` option:
@@ -146,9 +141,9 @@ Ports:
 
 You can also use `--format pretty` for the same effect.
 
+### <a name="format"></a> Format the output (--format)
 
-#### Find the number of tasks running as part of a service
-
+You can use the --format option to obtain specific information about a
 The `--format` option can be used to obtain specific information about a
 service. For example, the following command outputs the number of replicas
 of the "redis" service.

@@ -1,20 +1,16 @@
----
-title: "service scale"
-description: "The service scale command description and usage"
-keywords: "service, scale"
----
-
 # service scale
 
-```markdown
-Usage:  docker service scale [OPTIONS] SERVICE=REPLICAS [SERVICE=REPLICAS...]
-
+<!---MARKER_GEN_START-->
 Scale one or multiple replicated services
 
-Options:
-  -d, --detach                             Exit immediately instead of waiting for the service to converge (default true)
-      --help   Print usage
-```
+### Options
+
+| Name             | Type   | Default | Description                                                     |
+|:-----------------|:-------|:--------|:----------------------------------------------------------------|
+| `-d`, `--detach` | `bool` |         | Exit immediately instead of waiting for the service to converge |
+
+
+<!---MARKER_GEN_END-->
 
 ## Description
 
@@ -24,8 +20,7 @@ services which are global mode. The command will return immediately, but the
 actual scaling of the service may take some time. To stop all replicas of a
 service while keeping the service active in the swarm you can set the scale to 0.
 
-> **Note**
->
+> [!NOTE]
 > This is a cluster management command, and must be executed on a swarm
 > manager node. To learn about managers and workers, refer to the
 > [Swarm mode section](https://docs.docker.com/engine/swarm/) in the
@@ -89,7 +84,7 @@ $ docker service ls
 
 ID            NAME      MODE        REPLICAS  IMAGE
 3pr5mlvu3fh9  frontend  replicated  5/5       nginx:alpine
-74nzcxxjv6fq  backend   replicated  3/3       redis:3.0.6
+74nzcxxjv6fq  backend   replicated  3/3       redis:7.4.1
 ```
 
 ## Related commands

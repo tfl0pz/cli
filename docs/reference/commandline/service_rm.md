@@ -1,29 +1,20 @@
----
-title: "service rm"
-description: "The service rm command description and usage"
-keywords: "service, rm"
----
-
 # service rm
 
-```Markdown
-Usage:  docker service rm SERVICE [SERVICE...]
-
+<!---MARKER_GEN_START-->
 Remove one or more services
 
-Aliases:
-  rm, remove
+### Aliases
 
-Options:
-      --help   Print usage
-```
+`docker service rm`, `docker service remove`
+
+
+<!---MARKER_GEN_END-->
 
 ## Description
 
 Removes the specified services from the swarm.
 
-> **Note**
->
+> [!NOTE]
 > This is a cluster management command, and must be executed on a swarm
 > manager node. To learn about managers and workers, refer to the
 > [Swarm mode section](https://docs.docker.com/engine/swarm/) in the
@@ -43,8 +34,7 @@ $ docker service ls
 ID  NAME  MODE  REPLICAS  IMAGE
 ```
 
-> **Warning**
->
+> [!WARNING]
 > Unlike `docker rm`, this command does not ask for confirmation before removing
 > a running service.
 

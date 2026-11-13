@@ -5,55 +5,57 @@ import (
 	"strings"
 
 	"github.com/docker/cli/cli/command/formatter"
-	registry "github.com/docker/docker/api/types/registry"
+	registrytypes "github.com/moby/moby/api/types/registry"
+	"github.com/moby/moby/client"
 )
 
 const (
-	defaultSearchTableFormat = "table {{.Name}}\t{{.Description}}\t{{.StarCount}}\t{{.IsOfficial}}\t{{.IsAutomated}}"
+	defaultSearchTableFormat = "table {{.Name}}\t{{.Description}}\t{{.StarCount}}\t{{.IsOfficial}}"
 
 	starsHeader     = "STARS"
 	officialHeader  = "OFFICIAL"
 	automatedHeader = "AUTOMATED"
 )
 
-// NewSearchFormat returns a Format for rendering using a network Context
-func NewSearchFormat(source string) formatter.Format {
+// newFormat returns a Format for rendering using a searchContext.
+func newFormat(source string) formatter.Format {
 	switch source {
-	case "":
-		return defaultSearchTableFormat
-	case formatter.TableFormatKey:
+	case "", formatter.TableFormatKey:
 		return defaultSearchTableFormat
 	}
 	return formatter.Format(source)
 }
 
-// SearchWrite writes the context
-func SearchWrite(ctx formatter.Context, results []registry.SearchResult) error {
-	render := func(format func(subContext formatter.SubContext) error) error {
-		for _, result := range results {
-			searchCtx := &searchContext{trunc: ctx.Trunc, s: result}
-			if err := format(searchCtx); err != nil {
+// formatWrite writes the context.
+func formatWrite(fmtCtx formatter.Context, results client.ImageSearchResult) error {
+	searchCtx := &searchContext{
+		HeaderContext: formatter.HeaderContext{
+			Header: formatter.SubHeaderContext{
+				"Name":        formatter.NameHeader,
+				"Description": formatter.DescriptionHeader,
+				"StarCount":   starsHeader,
+				"IsOfficial":  officialHeader,
+			},
+		},
+	}
+	return fmtCtx.Write(searchCtx, func(format func(subContext formatter.SubContext) error) error {
+		for _, result := range results.Items {
+			if err := format(&searchContext{
+				trunc: fmtCtx.Trunc,
+				s:     result,
+			}); err != nil {
 				return err
 			}
 		}
 		return nil
-	}
-	searchCtx := searchContext{}
-	searchCtx.Header = formatter.SubHeaderContext{
-		"Name":        formatter.NameHeader,
-		"Description": formatter.DescriptionHeader,
-		"StarCount":   starsHeader,
-		"IsOfficial":  officialHeader,
-		"IsAutomated": automatedHeader,
-	}
-	return ctx.Write(&searchCtx, render)
+	})
 }
 
 type searchContext struct {
 	formatter.HeaderContext
 	trunc bool
 	json  bool
-	s     registry.SearchResult
+	s     registrytypes.SearchResult
 }
 
 func (c *searchContext) MarshalJSON() ([]byte, error) {
@@ -66,8 +68,8 @@ func (c *searchContext) Name() string {
 }
 
 func (c *searchContext) Description() string {
-	desc := strings.Replace(c.s.Description, "\n", " ", -1)
-	desc = strings.Replace(desc, "\r", " ", -1)
+	desc := strings.ReplaceAll(c.s.Description, "\n", " ")
+	desc = strings.ReplaceAll(desc, "\r", " ")
 	if c.trunc {
 		desc = formatter.Ellipsis(desc, 45)
 	}
@@ -93,8 +95,4 @@ func (c *searchContext) formatBool(value bool) string {
 
 func (c *searchContext) IsOfficial() string {
 	return c.formatBool(c.s.IsOfficial)
-}
-
-func (c *searchContext) IsAutomated() string {
-	return c.formatBool(c.s.IsAutomated)
 }

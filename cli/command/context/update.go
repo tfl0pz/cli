@@ -3,79 +3,60 @@ package context
 import (
 	"bytes"
 	"fmt"
-	"text/tabwriter"
 
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
+	"github.com/docker/cli/cli/command/formatter/tabwriter"
 	"github.com/docker/cli/cli/context/docker"
-	"github.com/docker/cli/cli/context/kubernetes"
 	"github.com/docker/cli/cli/context/store"
-	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 )
 
-// UpdateOptions are the options used to update a context
-type UpdateOptions struct {
-	Name                     string
-	Description              string
-	DefaultStackOrchestrator string
-	Docker                   map[string]string
-	Kubernetes               map[string]string
+// updateOptions are the options used to update a context.
+type updateOptions struct {
+	description string
+	endpoint    map[string]string
 }
 
 func longUpdateDescription() string {
 	buf := bytes.NewBuffer(nil)
 	buf.WriteString("Update a context\n\nDocker endpoint config:\n\n")
 	tw := tabwriter.NewWriter(buf, 20, 1, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tDESCRIPTION")
+	_, _ = fmt.Fprintln(tw, "NAME\tDESCRIPTION")
 	for _, d := range dockerConfigKeysDescriptions {
-		fmt.Fprintf(tw, "%s\t%s\n", d.name, d.description)
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", d.name, d.description)
 	}
-	tw.Flush()
-	buf.WriteString("\nKubernetes endpoint config:\n\n")
-	tw = tabwriter.NewWriter(buf, 20, 1, 3, ' ', 0)
-	fmt.Fprintln(tw, "NAME\tDESCRIPTION")
-	for _, d := range kubernetesConfigKeysDescriptions {
-		fmt.Fprintf(tw, "%s\t%s\n", d.name, d.description)
-	}
-	tw.Flush()
+	_ = tw.Flush()
 	buf.WriteString("\nExample:\n\n$ docker context update my-context --description \"some description\" --docker \"host=tcp://myserver:2376,ca=~/ca-file,cert=~/cert-file,key=~/key-file\"\n")
 	return buf.String()
 }
 
-func newUpdateCommand(dockerCli command.Cli) *cobra.Command {
-	opts := &UpdateOptions{}
+func newUpdateCommand(dockerCLI command.Cli) *cobra.Command {
+	opts := updateOptions{}
 	cmd := &cobra.Command{
 		Use:   "update [OPTIONS] CONTEXT",
 		Short: "Update a context",
 		Args:  cli.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			opts.Name = args[0]
-			return RunUpdate(dockerCli, opts)
+			return runUpdate(dockerCLI, args[0], opts)
 		},
-		Long: longUpdateDescription(),
+		Long:                  longUpdateDescription(),
+		ValidArgsFunction:     completeContextNames(dockerCLI, 1, false),
+		DisableFlagsInUseLine: true,
 	}
 	flags := cmd.Flags()
-	flags.StringVar(&opts.Description, "description", "", "Description of the context")
-	flags.StringVar(
-		&opts.DefaultStackOrchestrator,
-		"default-stack-orchestrator", "",
-		"Default orchestrator for stack operations to use with this context (swarm|kubernetes|all)")
-	flags.SetAnnotation("default-stack-orchestrator", "deprecated", nil)
-	flags.StringToStringVar(&opts.Docker, "docker", nil, "set the docker endpoint")
-	flags.StringToStringVar(&opts.Kubernetes, "kubernetes", nil, "set the kubernetes endpoint")
-	flags.SetAnnotation("kubernetes", "kubernetes", nil)
-	flags.SetAnnotation("kubernetes", "deprecated", nil)
+	flags.StringVar(&opts.description, "description", "", "Description of the context")
+	flags.StringToStringVar(&opts.endpoint, "docker", nil, "set the docker endpoint")
 	return cmd
 }
 
-// RunUpdate updates a Docker context
-func RunUpdate(cli command.Cli, o *UpdateOptions) error {
-	if err := store.ValidateContextName(o.Name); err != nil {
+// runUpdate updates a Docker context.
+func runUpdate(dockerCLI command.Cli, name string, opts updateOptions) error {
+	if err := store.ValidateContextName(name); err != nil {
 		return err
 	}
-	s := cli.ContextStore()
-	c, err := s.GetMetadata(o.Name)
+	s := dockerCLI.ContextStore()
+	c, err := s.GetMetadata(name)
 	if err != nil {
 		return err
 	}
@@ -83,65 +64,40 @@ func RunUpdate(cli command.Cli, o *UpdateOptions) error {
 	if err != nil {
 		return err
 	}
-	if o.DefaultStackOrchestrator != "" {
-		stackOrchestrator, err := command.NormalizeOrchestrator(o.DefaultStackOrchestrator)
-		if err != nil {
-			return errors.Wrap(err, "unable to parse default-stack-orchestrator")
-		}
-		dockerContext.StackOrchestrator = stackOrchestrator
-	}
-	if o.Description != "" {
-		dockerContext.Description = o.Description
+	if opts.description != "" {
+		dockerContext.Description = opts.description
 	}
 
 	c.Metadata = dockerContext
 
 	tlsDataToReset := make(map[string]*store.EndpointTLSData)
 
-	if o.Docker != nil {
-		dockerEP, dockerTLS, err := getDockerEndpointMetadataAndTLS(cli, o.Docker)
+	if opts.endpoint != nil {
+		dockerEP, dockerTLS, err := getDockerEndpointMetadataAndTLS(s, opts.endpoint)
 		if err != nil {
-			return errors.Wrap(err, "unable to create docker endpoint config")
+			return fmt.Errorf("unable to create docker endpoint config: %w", err)
 		}
 		c.Endpoints[docker.DockerEndpoint] = dockerEP
 		tlsDataToReset[docker.DockerEndpoint] = dockerTLS
 	}
-	if o.Kubernetes != nil {
-		kubernetesEP, kubernetesTLS, err := getKubernetesEndpointMetadataAndTLS(cli, o.Kubernetes)
-		if err != nil {
-			return errors.Wrap(err, "unable to create kubernetes endpoint config")
-		}
-		if kubernetesEP == nil {
-			delete(c.Endpoints, kubernetes.KubernetesEndpoint)
-		} else {
-			c.Endpoints[kubernetes.KubernetesEndpoint] = kubernetesEP
-			tlsDataToReset[kubernetes.KubernetesEndpoint] = kubernetesTLS
-		}
-	}
-	if err := validateEndpointsAndOrchestrator(c); err != nil {
+	if err := validateEndpoints(c); err != nil {
 		return err
 	}
 	if err := s.CreateOrUpdate(c); err != nil {
 		return err
 	}
 	for ep, tlsData := range tlsDataToReset {
-		if err := s.ResetEndpointTLSMaterial(o.Name, ep, tlsData); err != nil {
+		if err := s.ResetEndpointTLSMaterial(name, ep, tlsData); err != nil {
 			return err
 		}
 	}
 
-	fmt.Fprintln(cli.Out(), o.Name)
-	fmt.Fprintf(cli.Err(), "Successfully updated context %q\n", o.Name)
+	_, _ = fmt.Fprintln(dockerCLI.Out(), name)
+	_, _ = fmt.Fprintf(dockerCLI.Err(), "Successfully updated context %q\n", name)
 	return nil
 }
 
-func validateEndpointsAndOrchestrator(c store.Metadata) error {
-	dockerContext, err := command.GetDockerContext(c)
-	if err != nil {
-		return err
-	}
-	if _, ok := c.Endpoints[kubernetes.KubernetesEndpoint]; !ok && dockerContext.StackOrchestrator.HasKubernetes() {
-		return errors.Errorf("cannot specify orchestrator %q without configuring a Kubernetes endpoint", dockerContext.StackOrchestrator)
-	}
-	return nil
+func validateEndpoints(c store.Metadata) error {
+	_, err := command.GetDockerContext(c)
+	return err
 }

@@ -1,31 +1,41 @@
----
-title: docker checkpoint
-description: "The checkpoint command description and usage"
-keywords: experimental, checkpoint, restore, criu
-experimental: true
----
+# checkpoint
+
+<!---MARKER_GEN_START-->
+Manage checkpoints
+
+### Subcommands
+
+| Name                             | Description                                  |
+|:---------------------------------|:---------------------------------------------|
+| [`create`](checkpoint_create.md) | Create a checkpoint from a running container |
+| [`ls`](checkpoint_ls.md)         | List checkpoints for a container             |
+| [`rm`](checkpoint_rm.md)         | Remove a checkpoint                          |
+
+
+
+<!---MARKER_GEN_END-->
 
 ## Description
 
 Checkpoint and Restore is an experimental feature that allows you to freeze a running
-container by checkpointing it, which turns its state into a collection of files
+container by specifying a checkpoint, which turns the container state into a collection of files
 on disk. Later, the container can be restored from the point it was frozen.
 
-This is accomplished using a tool called [CRIU](http://criu.org), which is an
+This is accomplished using a tool called [CRIU](https://criu.org), which is an
 external dependency of this feature. A good overview of the history of
 checkpoint and restore in Docker is available in this
 [Kubernetes blog post](https://kubernetes.io/blog/2015/07/how-did-quake-demo-from-dockercon-work/).
 
 ### Installing CRIU
 
-If you use a Debian system, you can add the CRIU PPA and install with apt-get
-[from the criu launchpad](https://launchpad.net/~criu/+archive/ubuntu/ppa).
+If you use a Debian system, you can add the CRIU PPA and install with `apt-get`
+[from the CRIU launchpad](https://launchpad.net/~criu/+archive/ubuntu/ppa).
 
 Alternatively, you can [build CRIU from source](https://criu.org/Installation).
 
-You need at least version 2.0 of CRIU to run checkpoint/restore in Docker.
+You need at least version 2.0 of CRIU to run checkpoint and restore in Docker.
 
-### Use cases for checkpoint & restore
+### Use cases for checkpoint and restore
 
 This feature is currently focused on single-host use cases for checkpoint and
 restore. Here are a few:
@@ -35,21 +45,22 @@ restore. Here are a few:
 - "Rewinding" processes to an earlier point in time
 - "Forensic debugging" of running processes
 
-Another primary use case of checkpoint & restore outside of Docker is the live
+Another primary use case of checkpoint and restore outside of Docker is the live
 migration of a server from one machine to another. This is possible with the
 current implementation, but not currently a priority (and so the workflow is
 not optimized for the task).
 
-### Using checkpoint & restore
+### Using checkpoint and restore
 
 A new top level command `docker checkpoint` is introduced, with three subcommands:
-- `create` (creates a new checkpoint)
-- `ls` (lists existing checkpoints)
-- `rm` (deletes an existing checkpoint)
 
-Additionally, a `--checkpoint` flag is added to the container start command.
+- `docker checkpoint create` (creates a new checkpoint)
+- `docker checkpoint ls` (lists existing checkpoints)
+- `docker checkpoint rm` (deletes an existing checkpoint)
 
-The options for checkpoint create:
+Additionally, a `--checkpoint` flag is added to the `docker container start` command.
+
+The options for `docker checkpoint create`:
 
 ```console
 Usage:  docker checkpoint create [OPTIONS] CONTAINER CHECKPOINT
@@ -66,7 +77,7 @@ And to restore a container:
 Usage:  docker start --checkpoint CHECKPOINT_ID [OTHER OPTIONS] CONTAINER
 ```
 
-Example of using checkpoint & restore on a container:
+Example of using checkpoint and restore on a container:
 
 ```console
 $ docker run --security-opt=seccomp:unconfined --name cr -d busybox /bin/sh -c 'i=0; while true; do echo $i; i=$(expr $i + 1); sleep 1; done'
@@ -79,18 +90,18 @@ $ docker start --checkpoint checkpoint1 cr
 abc0123
 ```
 
-This process just logs an incrementing counter to stdout. If you `docker logs`
-in between running/checkpoint/restoring you should see that the counter
-increases while the process is running, stops while it's checkpointed, and
+This process just logs an incrementing counter to stdout. If you run `docker logs`
+in-between running/checkpoint/restoring, you should see that the counter
+increases while the process is running, stops while it's frozen, and
 resumes from the point it left off once you restore.
 
 ### Known limitations
 
-seccomp is only supported by CRIU in very up to date kernels.
+`seccomp` is only supported by CRIU in very up-to-date kernels.
 
-External terminal (i.e. `docker run -t ..`) is not supported at the moment.
-If you try to create a checkpoint for a container with an external terminal, 
-it would fail:
+External terminals (i.e. `docker run -t ..`) aren't supported.
+If you try to create a checkpoint for a container with an external terminal,
+it fails:
 
 ```console
 $ docker checkpoint create cr checkpoint1

@@ -2,17 +2,17 @@ package swarm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"strings"
 
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/swarm/progress"
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/pkg/jsonmessage"
-	"github.com/pkg/errors"
+	"github.com/docker/cli/internal/jsonstream"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -26,7 +26,7 @@ type caOptions struct {
 	quiet      bool
 }
 
-func newCACommand(dockerCli command.Cli) *cobra.Command {
+func newCACommand(dockerCLI command.Cli) *cobra.Command {
 	opts := caOptions{}
 
 	cmd := &cobra.Command{
@@ -34,9 +34,14 @@ func newCACommand(dockerCli command.Cli) *cobra.Command {
 		Short: "Display and rotate the root CA",
 		Args:  cli.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runCA(dockerCli, cmd.Flags(), opts)
+			return runCA(cmd.Context(), dockerCLI, cmd.Flags(), opts)
 		},
-		Annotations: map[string]string{"version": "1.30"},
+		Annotations: map[string]string{
+			"version": "1.30",
+			"swarm":   "manager",
+		},
+		ValidArgsFunction:     cobra.NoFileCompletions,
+		DisableFlagsInUseLine: true,
 	}
 
 	flags := cmd.Flags()
@@ -50,11 +55,10 @@ func newCACommand(dockerCli command.Cli) *cobra.Command {
 	return cmd
 }
 
-func runCA(dockerCli command.Cli, flags *pflag.FlagSet, opts caOptions) error {
-	client := dockerCli.Client()
-	ctx := context.Background()
+func runCA(ctx context.Context, dockerCLI command.Cli, flags *pflag.FlagSet, opts caOptions) error {
+	apiClient := dockerCLI.Client()
 
-	swarmInspect, err := client.SwarmInspect(ctx)
+	res, err := apiClient.SwarmInspect(ctx, client.SwarmInspectOptions{})
 	if err != nil {
 		return err
 	}
@@ -65,7 +69,7 @@ func runCA(dockerCli command.Cli, flags *pflag.FlagSet, opts caOptions) error {
 				return fmt.Errorf("`--%s` flag requires the `--rotate` flag to update the CA", f)
 			}
 		}
-		return displayTrustRoot(dockerCli.Out(), swarmInspect)
+		return displayTrustRoot(dockerCLI.Out(), res)
 	}
 
 	if flags.Changed(flagExternalCA) && len(opts.externalCA.Value()) > 0 && !flags.Changed(flagCACert) {
@@ -79,21 +83,24 @@ func runCA(dockerCli command.Cli, flags *pflag.FlagSet, opts caOptions) error {
 			flagCACert, flagCAKey, flagExternalCA)
 	}
 
-	updateSwarmSpec(&swarmInspect.Spec, flags, opts)
-	if err := client.SwarmUpdate(ctx, swarmInspect.Version, swarmInspect.Spec, swarm.UpdateFlags{}); err != nil {
+	updateSwarmSpec(&res.Swarm.Spec, flags, opts)
+	if _, err := apiClient.SwarmUpdate(ctx, client.SwarmUpdateOptions{
+		Version: res.Swarm.Version,
+		Spec:    res.Swarm.Spec,
+	}); err != nil {
 		return err
 	}
 
 	if opts.detach {
 		return nil
 	}
-	return attach(ctx, dockerCli, opts)
+	return attach(ctx, dockerCLI, opts)
 }
 
 func updateSwarmSpec(spec *swarm.Spec, flags *pflag.FlagSet, opts caOptions) {
 	caCert := opts.rootCACert.Contents()
 	caKey := opts.rootCAKey.Contents()
-	opts.mergeSwarmSpecCAFlags(spec, flags, caCert)
+	opts.mergeSwarmSpecCAFlags(spec, flags, &caCert)
 
 	spec.CAConfig.SigningCACert = caCert
 	spec.CAConfig.SigningCAKey = caKey
@@ -103,21 +110,21 @@ func updateSwarmSpec(spec *swarm.Spec, flags *pflag.FlagSet, opts caOptions) {
 	}
 }
 
-func attach(ctx context.Context, dockerCli command.Cli, opts caOptions) error {
-	client := dockerCli.Client()
+func attach(ctx context.Context, dockerCLI command.Cli, opts caOptions) error {
+	apiClient := dockerCLI.Client()
 	errChan := make(chan error, 1)
 	pipeReader, pipeWriter := io.Pipe()
 
 	go func() {
-		errChan <- progress.RootRotationProgress(ctx, client, pipeWriter)
+		errChan <- progress.RootRotationProgress(ctx, apiClient, pipeWriter)
 	}()
 
 	if opts.quiet {
-		go io.Copy(ioutil.Discard, pipeReader)
+		go io.Copy(io.Discard, pipeReader)
 		return <-errChan
 	}
 
-	err := jsonmessage.DisplayJSONMessagesToStream(pipeReader, dockerCli.Out(), nil)
+	err := jsonstream.Display(ctx, pipeReader, dockerCLI.Out())
 	if err == nil {
 		err = <-errChan
 	}
@@ -125,17 +132,17 @@ func attach(ctx context.Context, dockerCli command.Cli, opts caOptions) error {
 		return err
 	}
 
-	swarmInspect, err := client.SwarmInspect(ctx)
+	res, err := apiClient.SwarmInspect(ctx, client.SwarmInspectOptions{})
 	if err != nil {
 		return err
 	}
-	return displayTrustRoot(dockerCli.Out(), swarmInspect)
+	return displayTrustRoot(dockerCLI.Out(), res)
 }
 
-func displayTrustRoot(out io.Writer, info swarm.Swarm) error {
-	if info.ClusterInfo.TLSInfo.TrustRoot == "" {
-		return errors.New("No CA information available")
+func displayTrustRoot(out io.Writer, info client.SwarmInspectResult) error {
+	if info.Swarm.ClusterInfo.TLSInfo.TrustRoot == "" {
+		return errors.New("no CA information available")
 	}
-	fmt.Fprintln(out, strings.TrimSpace(info.ClusterInfo.TLSInfo.TrustRoot))
+	_, _ = fmt.Fprintln(out, strings.TrimSpace(info.Swarm.ClusterInfo.TLSInfo.TrustRoot))
 	return nil
 }

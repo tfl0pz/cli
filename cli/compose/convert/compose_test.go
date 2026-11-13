@@ -1,11 +1,13 @@
 package convert
 
 import (
+	"net/netip"
 	"testing"
 
 	composetypes "github.com/docker/cli/cli/compose/types"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/network"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/fs"
@@ -16,11 +18,21 @@ func TestNamespaceScope(t *testing.T) {
 	assert.Check(t, is.Equal("foo_bar", scoped))
 }
 
+func TestNamespaceDescope(t *testing.T) {
+	descoped := Namespace{name: "foo"}.Descope("foo_bar")
+	assert.Check(t, is.Equal("bar", descoped))
+}
+
+func TestNamespaceName(t *testing.T) {
+	namespaceName := Namespace{name: "foo"}.Name()
+	assert.Check(t, is.Equal("foo", namespaceName))
+}
+
 func TestAddStackLabel(t *testing.T) {
 	labels := map[string]string{
 		"something": "labeled",
 	}
-	actual := AddStackLabel(Namespace{name: "foo"}, labels)
+	actual := addStackLabel(Namespace{name: "foo"}, labels)
 	expected := map[string]string{
 		"something":    "labeled",
 		LabelNamespace: "foo",
@@ -47,7 +59,7 @@ func TestNetworks(t *testing.T) {
 				Driver: "driver",
 				Config: []*composetypes.IPAMPool{
 					{
-						Subnet: "10.0.0.0",
+						Subnet: "10.0.0.0/32",
 					},
 				},
 			},
@@ -67,7 +79,7 @@ func TestNetworks(t *testing.T) {
 			Name: "othername",
 		},
 	}
-	expected := map[string]types.NetworkCreate{
+	expected := map[string]client.NetworkCreateOptions{
 		"foo_default": {
 			Labels: map[string]string{
 				LabelNamespace: "foo",
@@ -79,7 +91,7 @@ func TestNetworks(t *testing.T) {
 				Driver: "driver",
 				Config: []network.IPAMConfig{
 					{
-						Subnet: "10.0.0.0",
+						Subnet: netip.MustParsePrefix("10.0.0.0/32"),
 					},
 				},
 			},
@@ -104,7 +116,7 @@ func TestNetworks(t *testing.T) {
 	}
 
 	networks, externals := Networks(namespace, source, serviceNetworks)
-	assert.DeepEqual(t, expected, networks)
+	assert.DeepEqual(t, expected, networks, cmpopts.EquateComparable(netip.Addr{}, netip.Prefix{}))
 	assert.DeepEqual(t, []string{"special"}, externals)
 }
 

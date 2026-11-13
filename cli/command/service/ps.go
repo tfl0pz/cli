@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/docker/cli/cli"
@@ -10,10 +11,7 @@ import (
 	"github.com/docker/cli/cli/command/node"
 	"github.com/docker/cli/cli/command/task"
 	"github.com/docker/cli/opts"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/client"
-	"github.com/pkg/errors"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -26,7 +24,7 @@ type psOptions struct {
 	filter    opts.FilterOpt
 }
 
-func newPsCommand(dockerCli command.Cli) *cobra.Command {
+func newPsCommand(dockerCLI command.Cli) *cobra.Command {
 	options := psOptions{filter: opts.NewFilterOpt()}
 
 	cmd := &cobra.Command{
@@ -35,8 +33,10 @@ func newPsCommand(dockerCli command.Cli) *cobra.Command {
 		Args:  cli.RequiresMinArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			options.services = args
-			return runPS(dockerCli, options)
+			return runPS(cmd.Context(), dockerCLI, options)
 		},
+		ValidArgsFunction:     completeServiceNames(dockerCLI),
+		DisableFlagsInUseLine: true,
 	}
 	flags := cmd.Flags()
 	flags.BoolVarP(&options.quiet, "quiet", "q", false, "Only display task IDs")
@@ -45,22 +45,23 @@ func newPsCommand(dockerCli command.Cli) *cobra.Command {
 	flags.StringVar(&options.format, "format", "", "Pretty-print tasks using a Go template")
 	flags.VarP(&options.filter, "filter", "f", "Filter output based on conditions provided")
 
+	_ = cmd.RegisterFlagCompletionFunc("filter", completeServicePsFilters(dockerCLI))
+
 	return cmd
 }
 
-func runPS(dockerCli command.Cli, options psOptions) error {
-	client := dockerCli.Client()
-	ctx := context.Background()
+func runPS(ctx context.Context, dockerCli command.Cli, options psOptions) error {
+	apiClient := dockerCli.Client()
 
-	filter, notfound, err := createFilter(ctx, client, options)
+	filter, notfound, err := createFilter(ctx, apiClient, options)
 	if err != nil {
 		return err
 	}
-	if err := updateNodeFilter(ctx, client, filter); err != nil {
+	if err := updateNodeFilter(ctx, apiClient, filter); err != nil {
 		return err
 	}
 
-	tasks, err := client.TaskList(ctx, types.TaskListOptions{Filters: filter})
+	tasks, err := apiClient.TaskList(ctx, client.TaskListOptions{Filters: filter})
 	if err != nil {
 		return err
 	}
@@ -72,7 +73,7 @@ func runPS(dockerCli command.Cli, options psOptions) error {
 	if options.quiet {
 		options.noTrunc = true
 	}
-	if err := task.Print(ctx, dockerCli, tasks, idresolver.New(client, options.noResolve), !options.noTrunc, options.quiet, format); err != nil {
+	if err := task.Print(ctx, dockerCli, tasks, idresolver.New(apiClient, options.noResolve), !options.noTrunc, options.quiet, format); err != nil {
 		return err
 	}
 	if len(notfound) != 0 {
@@ -81,20 +82,20 @@ func runPS(dockerCli command.Cli, options psOptions) error {
 	return nil
 }
 
-func createFilter(ctx context.Context, client client.APIClient, options psOptions) (filters.Args, []string, error) {
+func createFilter(ctx context.Context, apiClient client.APIClient, options psOptions) (client.Filters, []string, error) {
 	filter := options.filter.Value()
 
-	serviceIDFilter := filters.NewArgs()
-	serviceNameFilter := filters.NewArgs()
+	serviceIDFilter := make(client.Filters)
+	serviceNameFilter := make(client.Filters)
 	for _, service := range options.services {
 		serviceIDFilter.Add("id", service)
 		serviceNameFilter.Add("name", service)
 	}
-	serviceByIDList, err := client.ServiceList(ctx, types.ServiceListOptions{Filters: serviceIDFilter})
+	serviceByID, err := apiClient.ServiceList(ctx, client.ServiceListOptions{Filters: serviceIDFilter})
 	if err != nil {
 		return filter, nil, err
 	}
-	serviceByNameList, err := client.ServiceList(ctx, types.ServiceListOptions{Filters: serviceNameFilter})
+	serviceByName, err := apiClient.ServiceList(ctx, client.ServiceListOptions{Filters: serviceNameFilter})
 	if err != nil {
 		return filter, nil, err
 	}
@@ -104,14 +105,14 @@ func createFilter(ctx context.Context, client client.APIClient, options psOption
 loop:
 	// Match services by 1. Full ID, 2. Full name, 3. ID prefix. An error is returned if the ID-prefix match is ambiguous
 	for _, service := range options.services {
-		for _, s := range serviceByIDList {
+		for _, s := range serviceByID.Items {
 			if s.ID == service {
 				filter.Add("service", s.ID)
 				serviceCount++
 				continue loop
 			}
 		}
-		for _, s := range serviceByNameList {
+		for _, s := range serviceByName.Items {
 			if s.Spec.Annotations.Name == service {
 				filter.Add("service", s.ID)
 				serviceCount++
@@ -119,7 +120,7 @@ loop:
 			}
 		}
 		found := false
-		for _, s := range serviceByIDList {
+		for _, s := range serviceByID.Items {
 			if strings.HasPrefix(s.ID, service) {
 				if found {
 					return filter, nil, errors.New("multiple services found with provided prefix: " + service)
@@ -139,15 +140,15 @@ loop:
 	return filter, notfound, err
 }
 
-func updateNodeFilter(ctx context.Context, client client.APIClient, filter filters.Args) error {
-	if filter.Contains("node") {
-		nodeFilters := filter.Get("node")
-		for _, nodeFilter := range nodeFilters {
-			nodeReference, err := node.Reference(ctx, client, nodeFilter)
+func updateNodeFilter(ctx context.Context, apiClient client.APIClient, filter client.Filters) error {
+	if nodeFilters, ok := filter["node"]; ok {
+		for nodeFilter := range nodeFilters {
+			nodeReference, err := node.Reference(ctx, apiClient, nodeFilter)
 			if err != nil {
 				return err
 			}
-			filter.Del("node", nodeFilter)
+			// TODO(thaJeztah): add utility to remove?
+			delete(filter["node"], nodeFilter)
 			filter.Add("node", nodeReference)
 		}
 	}

@@ -2,30 +2,20 @@ package command_test
 
 import (
 	"bytes"
-	"context"
-	"fmt"
+	"path"
+	"path/filepath"
 	"testing"
 
-	"github.com/pkg/errors"
+	"github.com/docker/cli/cli/command"
+	"github.com/docker/cli/cli/config/configfile"
+	configtypes "github.com/docker/cli/cli/config/types"
+	"github.com/moby/moby/api/pkg/authconfig"
+	"github.com/moby/moby/api/types/registry"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
-
-	// Prevents a circular import with "github.com/docker/cli/internal/test"
-
-	. "github.com/docker/cli/cli/command"
-	configtypes "github.com/docker/cli/cli/config/types"
-	"github.com/docker/cli/cli/debug"
-	"github.com/docker/cli/internal/test"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/client"
 )
 
-type fakeClient struct {
-	client.Client
-	infoFunc func() (types.Info, error)
-}
-
-var testAuthConfigs = []types.AuthConfig{
+var testAuthConfigs = []registry.AuthConfig{
 	{
 		ServerAddress: "https://index.docker.io/v1/",
 		Username:      "u0",
@@ -38,75 +28,16 @@ var testAuthConfigs = []types.AuthConfig{
 	},
 }
 
-func (cli *fakeClient) Info(_ context.Context) (types.Info, error) {
-	if cli.infoFunc != nil {
-		return cli.infoFunc()
-	}
-	return types.Info{}, nil
-}
-
-func TestElectAuthServer(t *testing.T) {
-	testCases := []struct {
-		expectedAuthServer string
-		expectedWarning    string
-		infoFunc           func() (types.Info, error)
-	}{
-		{
-			expectedAuthServer: "https://index.docker.io/v1/",
-			expectedWarning:    "",
-			infoFunc: func() (types.Info, error) {
-				return types.Info{IndexServerAddress: "https://index.docker.io/v1/"}, nil
-			},
-		},
-		{
-			expectedAuthServer: "https://index.docker.io/v1/",
-			expectedWarning:    "Empty registry endpoint from daemon",
-			infoFunc: func() (types.Info, error) {
-				return types.Info{IndexServerAddress: ""}, nil
-			},
-		},
-		{
-			expectedAuthServer: "https://foo.example.com",
-			expectedWarning:    "",
-			infoFunc: func() (types.Info, error) {
-				return types.Info{IndexServerAddress: "https://foo.example.com"}, nil
-			},
-		},
-		{
-			expectedAuthServer: "https://index.docker.io/v1/",
-			expectedWarning:    "failed to get default registry endpoint from daemon",
-			infoFunc: func() (types.Info, error) {
-				return types.Info{}, errors.Errorf("error getting info")
-			},
-		},
-	}
-	// Enable debug to see warnings we're checking for
-	debug.Enable()
-	for _, tc := range testCases {
-		cli := test.NewFakeCli(&fakeClient{infoFunc: tc.infoFunc})
-		server := ElectAuthServer(context.Background(), cli)
-		assert.Check(t, is.Equal(tc.expectedAuthServer, server))
-		actual := cli.ErrBuffer().String()
-		if tc.expectedWarning == "" {
-			assert.Check(t, is.Len(actual, 0))
-		} else {
-			assert.Check(t, is.Contains(actual, tc.expectedWarning))
-		}
-	}
-}
-
 func TestGetDefaultAuthConfig(t *testing.T) {
 	testCases := []struct {
 		checkCredStore     bool
 		inputServerAddress string
-		expectedErr        string
-		expectedAuthConfig types.AuthConfig
+		expectedAuthConfig registry.AuthConfig
 	}{
 		{
 			checkCredStore:     false,
 			inputServerAddress: "",
-			expectedErr:        "",
-			expectedAuthConfig: types.AuthConfig{
+			expectedAuthConfig: registry.AuthConfig{
 				ServerAddress: "",
 				Username:      "",
 				Password:      "",
@@ -115,37 +46,162 @@ func TestGetDefaultAuthConfig(t *testing.T) {
 		{
 			checkCredStore:     true,
 			inputServerAddress: testAuthConfigs[0].ServerAddress,
-			expectedErr:        "",
 			expectedAuthConfig: testAuthConfigs[0],
 		},
 		{
 			checkCredStore:     true,
 			inputServerAddress: testAuthConfigs[1].ServerAddress,
-			expectedErr:        "",
 			expectedAuthConfig: testAuthConfigs[1],
 		},
 		{
 			checkCredStore:     true,
-			inputServerAddress: fmt.Sprintf("https://%s", testAuthConfigs[1].ServerAddress),
-			expectedErr:        "",
+			inputServerAddress: "https://" + testAuthConfigs[1].ServerAddress,
 			expectedAuthConfig: testAuthConfigs[1],
 		},
 	}
-	cli := test.NewFakeCli(&fakeClient{})
-	errBuf := new(bytes.Buffer)
-	cli.SetErr(errBuf)
-	for _, authconfig := range testAuthConfigs {
-		cli.ConfigFile().GetCredentialsStore(authconfig.ServerAddress).Store(configtypes.AuthConfig(authconfig))
+
+	tmpDir := t.TempDir()
+	cfg := configfile.New(filepath.Join(tmpDir, "cli-config.json"))
+	for _, authConfig := range testAuthConfigs {
+		assert.Check(t, cfg.GetCredentialsStore(authConfig.ServerAddress).Store(configtypes.AuthConfig{
+			Username:      authConfig.Username,
+			Password:      authConfig.Password,
+			ServerAddress: authConfig.ServerAddress,
+
+			// TODO(thaJeztah): Are these expected to be included?
+			Auth:          authConfig.Auth,
+			IdentityToken: authConfig.IdentityToken,
+			RegistryToken: authConfig.RegistryToken,
+		}))
 	}
 	for _, tc := range testCases {
 		serverAddress := tc.inputServerAddress
-		authconfig, err := GetDefaultAuthConfig(cli, tc.checkCredStore, serverAddress, serverAddress == "https://index.docker.io/v1/")
-		if tc.expectedErr != "" {
-			assert.Check(t, err != nil)
-			assert.Check(t, is.Equal(tc.expectedErr, err.Error()))
-		} else {
-			assert.NilError(t, err)
-			assert.Check(t, is.DeepEqual(tc.expectedAuthConfig, *authconfig))
+		authCfg, err := command.GetDefaultAuthConfig(cfg, tc.checkCredStore, serverAddress, serverAddress == "https://index.docker.io/v1/")
+		assert.NilError(t, err)
+		assert.Check(t, is.DeepEqual(tc.expectedAuthConfig, authCfg))
+	}
+}
+
+func TestGetDefaultAuthConfig_HelperError(t *testing.T) {
+	cfg := configfile.New("filename")
+	cfg.CredentialsStore = "fake-does-not-exist"
+
+	const serverAddress = "test-server-address"
+	expectedAuthConfig := registry.AuthConfig{
+		ServerAddress: serverAddress,
+	}
+	const isDefaultRegistry = false // registry is not "https://index.docker.io/v1/"
+	authCfg, err := command.GetDefaultAuthConfig(cfg, true, serverAddress, isDefaultRegistry)
+	assert.Check(t, is.DeepEqual(expectedAuthConfig, authCfg))
+	assert.Check(t, is.ErrorContains(err, "docker-credential-fake-does-not-exist"))
+}
+
+func TestRetrieveAuthTokenFromImage(t *testing.T) {
+	// configFileContent contains a plain-text "username:password", as stored by
+	// the plain-text store;
+	// https://github.com/docker/cli/blob/v28.0.4/cli/config/configfile/file.go#L218-L229
+	const configFileContent = `{"auths": {
+		"https://index.docker.io/v1/": {"auth": "dXNlcm5hbWU6cGFzc3dvcmQ="},
+		"[::1]": {"auth": "dXNlcm5hbWU6cGFzc3dvcmQ="},
+		"[::1]:5000": {"auth": "dXNlcm5hbWU6cGFzc3dvcmQ="},
+		"127.0.0.1": {"auth": "dXNlcm5hbWU6cGFzc3dvcmQ="},
+		"127.0.0.1:5000": {"auth": "dXNlcm5hbWU6cGFzc3dvcmQ="},
+		"localhost": {"auth": "dXNlcm5hbWU6cGFzc3dvcmQ="},
+		"localhost:5000": {"auth": "dXNlcm5hbWU6cGFzc3dvcmQ="},
+		"registry-1.docker.io": {"auth": "dXNlcm5hbWU6cGFzc3dvcmQ="},
+		"registry.hub.docker.com": {"auth": "dXNlcm5hbWU6cGFzc3dvcmQ="}
+	}
+}`
+	cfg := configfile.ConfigFile{}
+	err := cfg.LoadFromReader(bytes.NewReader([]byte(configFileContent)))
+	assert.NilError(t, err)
+
+	remoteRefs := []string{
+		"ubuntu",
+		"ubuntu:latest",
+		"ubuntu:latest@sha256:72297848456d5d37d1262630108ab308d3e9ec7ed1c3286a32fe09856619a782",
+		"ubuntu@sha256:72297848456d5d37d1262630108ab308d3e9ec7ed1c3286a32fe09856619a782",
+		"library/ubuntu",
+		"library/ubuntu:latest",
+		"library/ubuntu:latest@sha256:72297848456d5d37d1262630108ab308d3e9ec7ed1c3286a32fe09856619a782",
+		"library/ubuntu@sha256:72297848456d5d37d1262630108ab308d3e9ec7ed1c3286a32fe09856619a782",
+	}
+
+	tests := []struct {
+		prefix          string
+		expectedAddress string
+		expectedAuthCfg registry.AuthConfig
+	}{
+		{
+			prefix:          "",
+			expectedAddress: "https://index.docker.io/v1/",
+			expectedAuthCfg: registry.AuthConfig{Username: "username", Password: "password", ServerAddress: "https://index.docker.io/v1/"},
+		},
+		{
+			prefix:          "docker.io",
+			expectedAddress: "https://index.docker.io/v1/",
+			expectedAuthCfg: registry.AuthConfig{Username: "username", Password: "password", ServerAddress: "https://index.docker.io/v1/"},
+		},
+		{
+			prefix:          "index.docker.io",
+			expectedAddress: "https://index.docker.io/v1/",
+			expectedAuthCfg: registry.AuthConfig{Username: "username", Password: "password", ServerAddress: "https://index.docker.io/v1/"},
+		},
+		{
+			// FIXME(thaJeztah): registry-1.docker.io (the actual registry) is the odd one out, and is stored separate from other URLs used for docker hub's registry
+			prefix:          "registry-1.docker.io",
+			expectedAuthCfg: registry.AuthConfig{Username: "username", Password: "password", ServerAddress: "registry-1.docker.io"},
+		},
+		{
+			// FIXME(thaJeztah): registry.hub.docker.com is stored separate from other URLs used for docker hub's registry
+			prefix:          "registry.hub.docker.com",
+			expectedAuthCfg: registry.AuthConfig{Username: "username", Password: "password", ServerAddress: "registry.hub.docker.com"},
+		},
+		{
+			prefix:          "[::1]",
+			expectedAddress: "[::1]",
+			expectedAuthCfg: registry.AuthConfig{Username: "username", Password: "password", ServerAddress: "[::1]"},
+		},
+		{
+			prefix:          "[::1]:5000",
+			expectedAddress: "[::1]:5000",
+			expectedAuthCfg: registry.AuthConfig{Username: "username", Password: "password", ServerAddress: "[::1]:5000"},
+		},
+		{
+			prefix:          "127.0.0.1",
+			expectedAddress: "127.0.0.1",
+			expectedAuthCfg: registry.AuthConfig{Username: "username", Password: "password", ServerAddress: "127.0.0.1"},
+		},
+		{
+			prefix:          "localhost",
+			expectedAddress: "localhost",
+			expectedAuthCfg: registry.AuthConfig{Username: "username", Password: "password", ServerAddress: "localhost"},
+		},
+		{
+			prefix:          "localhost:5000",
+			expectedAddress: "localhost:5000",
+			expectedAuthCfg: registry.AuthConfig{Username: "username", Password: "password", ServerAddress: "localhost:5000"},
+		},
+		{
+			prefix:          "no-auth.example.com",
+			expectedAuthCfg: registry.AuthConfig{},
+		},
+	}
+
+	for _, tc := range tests {
+		tcName := tc.prefix
+		if tc.prefix == "" {
+			tcName = "no-prefix"
 		}
+		t.Run(tcName, func(t *testing.T) {
+			for _, remoteRef := range remoteRefs {
+				imageRef := path.Join(tc.prefix, remoteRef)
+				actual, err := command.RetrieveAuthTokenFromImage(&cfg, imageRef)
+				assert.NilError(t, err)
+				expectedAuthCfg, err := authconfig.Encode(tc.expectedAuthCfg)
+				assert.NilError(t, err)
+				assert.Equal(t, actual, expectedAuthCfg)
+			}
+		})
 	}
 }

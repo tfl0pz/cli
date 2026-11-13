@@ -9,7 +9,7 @@ container is unpaused, and then run
 # CAPABILITIES
 
 `privileged` gives the process extended
-[Linux capabilities](http://man7.org/linux/man-pages/man7/capabilities.7.html)
+[Linux capabilities](https://man7.org/linux/man-pages/man7/capabilities.7.html)
 when running in a container. 
 
 Without this flag, the process run by `docker exec` in a running container has
@@ -19,7 +19,7 @@ the same capabilities as the container, which may be limited. Set
 # USER
 `user` sets the username or UID used and optionally the groupname or GID for the specified command.
 
-   The followings examples are all valid:
+   The following examples are all valid:
    --user [user | user:group | uid | uid:gid | user:gid | uid:group ]
 
    Without this argument the command will be run as root in the container.

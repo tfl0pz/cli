@@ -3,7 +3,7 @@ package builders
 import (
 	"time"
 
-	"github.com/docker/docker/api/types/swarm"
+	"github.com/moby/moby/api/types/swarm"
 )
 
 // Secret creates a secret with default values.
@@ -42,9 +42,9 @@ func SecretDriver(driver string) func(secret *swarm.Secret) {
 }
 
 // SecretID sets the secret's ID
-func SecretID(ID string) func(secret *swarm.Secret) {
+func SecretID(id string) func(secret *swarm.Secret) {
 	return func(secret *swarm.Secret) {
-		secret.ID = ID
+		secret.ID = id
 	}
 }
 

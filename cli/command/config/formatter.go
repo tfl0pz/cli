@@ -1,15 +1,19 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package config
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
-	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/formatter"
 	"github.com/docker/cli/cli/command/inspect"
-	"github.com/docker/docker/api/types/swarm"
-	units "github.com/docker/go-units"
+	"github.com/docker/go-units"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 )
 
 const (
@@ -30,8 +34,8 @@ Data:
 {{.Data}}`
 )
 
-// NewFormat returns a Format for rendering using a config Context
-func NewFormat(source string, quiet bool) formatter.Format {
+// newFormat returns a Format for rendering using a configContext.
+func newFormat(source string, quiet bool) formatter.Format {
 	switch source {
 	case formatter.PrettyFormatKey:
 		return configInspectPrettyTemplate
@@ -44,31 +48,28 @@ func NewFormat(source string, quiet bool) formatter.Format {
 	return formatter.Format(source)
 }
 
-// FormatWrite writes the context
-func FormatWrite(ctx formatter.Context, configs []swarm.Config) error {
-	render := func(format func(subContext formatter.SubContext) error) error {
-		for _, config := range configs {
+// formatWrite writes the context
+func formatWrite(fmtCtx formatter.Context, configs client.ConfigListResult) error {
+	cCtx := &configContext{
+		HeaderContext: formatter.HeaderContext{
+			Header: formatter.SubHeaderContext{
+				"ID":        configIDHeader,
+				"Name":      formatter.NameHeader,
+				"CreatedAt": configCreatedHeader,
+				"UpdatedAt": configUpdatedHeader,
+				"Labels":    formatter.LabelsHeader,
+			},
+		},
+	}
+	return fmtCtx.Write(cCtx, func(format func(subContext formatter.SubContext) error) error {
+		for _, config := range configs.Items {
 			configCtx := &configContext{c: config}
 			if err := format(configCtx); err != nil {
 				return err
 			}
 		}
 		return nil
-	}
-	return ctx.Write(newConfigContext(), render)
-}
-
-func newConfigContext() *configContext {
-	cCtx := &configContext{}
-
-	cCtx.Header = formatter.SubHeaderContext{
-		"ID":        configIDHeader,
-		"Name":      formatter.NameHeader,
-		"CreatedAt": configCreatedHeader,
-		"UpdatedAt": configUpdatedHeader,
-		"Labels":    formatter.LabelsHeader,
-	}
-	return cCtx
+	})
 }
 
 type configContext struct {
@@ -101,10 +102,11 @@ func (c *configContext) Labels() string {
 	if mapLabels == nil {
 		return ""
 	}
-	var joinLabels []string
+	joinLabels := make([]string, 0, len(mapLabels))
 	for k, v := range mapLabels {
-		joinLabels = append(joinLabels, fmt.Sprintf("%s=%s", k, v))
+		joinLabels = append(joinLabels, k+"="+v)
 	}
+	slices.Sort(joinLabels)
 	return strings.Join(joinLabels, ",")
 }
 
@@ -115,12 +117,12 @@ func (c *configContext) Label(name string) string {
 	return c.c.Spec.Annotations.Labels[name]
 }
 
-// InspectFormatWrite renders the context for a list of configs
-func InspectFormatWrite(ctx formatter.Context, refs []string, getRef inspect.GetRefFunc) error {
-	if ctx.Format != configInspectPrettyTemplate {
-		return inspect.Inspect(ctx.Output, refs, string(ctx.Format), getRef)
+// inspectFormatWrite renders the context for a list of configs
+func inspectFormatWrite(fmtCtx formatter.Context, refs []string, getRef inspect.GetRefFunc) error {
+	if fmtCtx.Format != configInspectPrettyTemplate {
+		return inspect.Inspect(fmtCtx.Output, refs, string(fmtCtx.Format), getRef)
 	}
-	render := func(format func(subContext formatter.SubContext) error) error {
+	return fmtCtx.Write(&configInspectContext{}, func(format func(subContext formatter.SubContext) error) error {
 		for _, ref := range refs {
 			configI, _, err := getRef(ref)
 			if err != nil {
@@ -135,8 +137,7 @@ func InspectFormatWrite(ctx formatter.Context, refs []string, getRef inspect.Get
 			}
 		}
 		return nil
-	}
-	return ctx.Write(&configInspectContext{}, render)
+	})
 }
 
 type configInspectContext struct {
@@ -157,11 +158,11 @@ func (ctx *configInspectContext) Labels() map[string]string {
 }
 
 func (ctx *configInspectContext) CreatedAt() string {
-	return command.PrettyPrint(ctx.Config.CreatedAt)
+	return formatter.PrettyPrint(ctx.Config.CreatedAt)
 }
 
 func (ctx *configInspectContext) UpdatedAt() string {
-	return command.PrettyPrint(ctx.Config.UpdatedAt)
+	return formatter.PrettyPrint(ctx.Config.UpdatedAt)
 }
 
 func (ctx *configInspectContext) Data() string {

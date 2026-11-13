@@ -1,28 +1,30 @@
----
-title: "system prune"
-description: "Remove unused data"
-keywords: "system, prune, delete, remove"
----
-
 # system prune
 
-```markdown
-Usage:  docker system prune [OPTIONS]
-
+<!---MARKER_GEN_START-->
 Remove unused data
 
-Options:
-  -a, --all             Remove all unused images not just dangling ones
-      --filter filter   Provide filter values (e.g. 'label=<key>=<value>')
-  -f, --force           Do not prompt for confirmation
-      --help            Print usage
-      --volumes         Prune volumes
-```
+### Options
+
+| Name                  | Type     | Default | Description                                        |
+|:----------------------|:---------|:--------|:---------------------------------------------------|
+| `-a`, `--all`         | `bool`   |         | Remove all unused images not just dangling ones    |
+| [`--filter`](#filter) | `filter` |         | Provide filter values (e.g. `label=<key>=<value>`) |
+| `-f`, `--force`       | `bool`   |         | Do not prompt for confirmation                     |
+| `--volumes`           | `bool`   |         | Prune anonymous volumes                            |
+
+
+<!---MARKER_GEN_END-->
 
 ## Description
 
-Remove all unused containers, networks, images (both dangling and unreferenced),
-and optionally, volumes.
+Remove all unused containers, networks, images (both dangling and unused),
+unused [build cache](https://docs.docker.com/build/cache/), and optionally,
+volumes.
+
+Build cache is always eligible for pruning with this command (including BuildKit
+cache mounts created with `RUN --mount=type=cache`). Use
+[`docker builder prune`](builder_prune.md) if you only want to reclaim build
+cache without removing containers, networks, or images.
 
 ## Examples
 
@@ -33,7 +35,7 @@ WARNING! This will remove:
         - all stopped containers
         - all networks not used by at least one container
         - all dangling images
-        - all build cache
+        - unused build cache
 Are you sure you want to continue? [y/N] y
 
 Deleted Containers:
@@ -52,9 +54,9 @@ deleted: sha256:45761469c965421a92a69cc50e92c01e0cfa94fe026cdd1233445ea00e96289a
 Total reclaimed space: 1.84kB
 ```
 
-By default, volumes are not removed to prevent important data from being
+By default, volumes aren't removed to prevent important data from being
 deleted if there is currently no container using the volume. Use the `--volumes`
-flag when running the command to prune volumes as well:
+flag when running the command to prune anonymous volumes as well:
 
 ```console
 $ docker system prune -a --volumes
@@ -62,7 +64,7 @@ $ docker system prune -a --volumes
 WARNING! This will remove:
         - all stopped containers
         - all networks not used by at least one container
-        - all volumes not used by at least one container
+        - all anonymous volumes not used by at least one container
         - all images without at least one container associated to them
         - all build cache
 Are you sure you want to continue? [y/N] y
@@ -76,7 +78,8 @@ my-network-a
 my-network-b
 
 Deleted Volumes:
-named-vol
+1e31bcd425e913d9f65ec0c3841e9c4ebb543aead2a1cfe0d95a7c5e88bb5026
+6a6ab3d6b8d740a1c1d4dbe36a9c5f043dd4bac5f78abfa7d1f2ae5789fe60b0
 
 Deleted Images:
 untagged: my-curl:latest
@@ -97,10 +100,22 @@ deleted: sha256:3a88a5c81eb5c283e72db2dbc6d65cbfd8e80b6c89bb6e714cfaaa0eed99c548
 Total reclaimed space: 13.5 MB
 ```
 
-### Filtering
+### <a name="filter"></a> Filtering (--filter)
 
 The filtering flag (`--filter`) format is of "key=value". If there is more
-than one filter, then pass multiple flags (e.g., `--filter "foo=bar" --filter "bif=baz"`)
+than one filter, then pass multiple flags (e.g., `--filter "foo=bar" --filter "bif=baz"`).
+
+When multiple filters are provided, they are combined as follows:
+
+- Multiple filters with **different keys** are combined using AND logic.
+  An item must satisfy all filter conditions to be pruned.
+- Multiple filters with the **same key** are combined using OR logic.
+  An item is pruned if it matches any of the values for that key.
+
+For example, `--filter "label=foo" --filter "until=24h"` prunes items
+that have the `foo` label **and** were created more than 24 hours ago.
+Conversely, `--filter "label=foo" --filter "label=bar"` prunes items
+that have **either** the `foo` **or** `bar` label.
 
 The currently supported filters are:
 
@@ -108,12 +123,12 @@ The currently supported filters are:
 * label (`label=<key>`, `label=<key>=<value>`, `label!=<key>`, or `label!=<key>=<value>`) - only remove containers, images, networks, and volumes with (or without, in case `label!=...` is used) the specified labels.
 
 The `until` filter can be Unix timestamps, date formatted
-timestamps, or Go duration strings (e.g. `10m`, `1h30m`) computed
+timestamps, or Go duration strings supported by [ParseDuration](https://pkg.go.dev/time#ParseDuration) (e.g. `10m`, `1h30m`) computed
 relative to the daemon machine’s time. Supported formats for date
 formatted time stamps include RFC3339Nano, RFC3339, `2006-01-02T15:04:05`,
-`2006-01-02T15:04:05.999999999`, `2006-01-02Z07:00`, and `2006-01-02`. The local
+`2006-01-02T15:04:05.999999999`, `2006-01-02T07:00`, and `2006-01-02`. The local
 timezone on the daemon will be used if you do not provide either a `Z` or a
-`+-00:00` timezone offset at the end of the timestamp.  When providing Unix
+`+-00:00` timezone offset at the end of the timestamp. When providing Unix
 timestamps enter seconds[.nanoseconds], where seconds is the number of seconds
 that have elapsed since January 1, 1970 (midnight UTC/GMT), not counting leap
 seconds (aka Unix epoch or Unix time), and the optional .nanoseconds field is a

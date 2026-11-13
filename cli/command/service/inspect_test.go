@@ -1,29 +1,34 @@
+// FIXME(thaJeztah): remove once we are a module; the go:build directive prevents go from downgrading language version to go1.16:
+//go:build go1.26
+
 package service
 
 import (
 	"bytes"
 	"encoding/json"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/docker/cli/cli/command/formatter"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/swarm"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/api/types/swarm"
 	"gotest.tools/v3/assert"
 	is "gotest.tools/v3/assert/cmp"
 	"gotest.tools/v3/golden"
 )
 
 func formatServiceInspect(t *testing.T, format formatter.Format, now time.Time) string {
+	t.Helper()
 	b := new(bytes.Buffer)
 
 	endpointSpec := &swarm.EndpointSpec{
 		Mode: "vip",
 		Ports: []swarm.PortConfig{
 			{
-				Protocol:   swarm.PortConfigProtocolTCP,
+				Protocol:   network.TCP,
 				TargetPort: 5000,
 			},
 		},
@@ -104,7 +109,7 @@ func formatServiceInspect(t *testing.T, format formatter.Format, now time.Time) 
 			Spec: *endpointSpec,
 			Ports: []swarm.PortConfig{
 				{
-					Protocol:      swarm.PortConfigProtocolTCP,
+					Protocol:      network.TCP,
 					TargetPort:    5000,
 					PublishedPort: 30000,
 				},
@@ -112,7 +117,7 @@ func formatServiceInspect(t *testing.T, format formatter.Format, now time.Time) 
 			VirtualIPs: []swarm.EndpointVirtualIP{
 				{
 					NetworkID: "6o4107cj2jx9tihgb0jyts6pj",
-					Addr:      "10.255.0.4/16",
+					Addr:      netip.MustParsePrefix("10.255.0.4/16"), // FIXME(thaJeztah): this was testing with "10.255.0.4/16"
 				},
 			},
 		},
@@ -127,14 +132,16 @@ func formatServiceInspect(t *testing.T, format formatter.Format, now time.Time) 
 		Format: format,
 	}
 
-	err := InspectFormatWrite(ctx, []string{"de179gar9d0o7ltdybungplod"},
-		func(ref string) (interface{}, []byte, error) {
+	err := inspectFormatWrite(ctx, []string{"de179gar9d0o7ltdybungplod"},
+		func(ref string) (any, []byte, error) {
 			return s, nil, nil
 		},
-		func(ref string) (interface{}, []byte, error) {
-			return types.NetworkResource{
-				ID:   "5vpyomhb6ievnk0i0o60gcnei",
-				Name: "mynetwork",
+		func(ref string) (any, []byte, error) {
+			return network.Summary{
+				Network: network.Network{
+					ID:   "5vpyomhb6ievnk0i0o60gcnei",
+					Name: "mynetwork",
+				},
 			}, nil, nil
 		},
 	)
@@ -145,12 +152,12 @@ func formatServiceInspect(t *testing.T, format formatter.Format, now time.Time) 
 }
 
 func TestPrettyPrint(t *testing.T) {
-	s := formatServiceInspect(t, NewFormat("pretty"), time.Now())
+	s := formatServiceInspect(t, newFormat("pretty"), time.Now())
 	golden.Assert(t, s, "service-inspect-pretty.golden")
 }
 
 func TestPrettyPrintWithNoUpdateConfig(t *testing.T) {
-	s := formatServiceInspect(t, NewFormat("pretty"), time.Now())
+	s := formatServiceInspect(t, newFormat("pretty"), time.Now())
 	if strings.Contains(s, "UpdateStatus") {
 		t.Fatal("Pretty print failed before parsing UpdateStatus")
 	}
@@ -163,9 +170,9 @@ func TestJSONFormatWithNoUpdateConfig(t *testing.T) {
 	now := time.Now()
 	// s1: [{"ID":..}]
 	// s2: {"ID":..}
-	s1 := formatServiceInspect(t, NewFormat(""), now)
-	s2 := formatServiceInspect(t, NewFormat("{{json .}}"), now)
-	var m1Wrap []map[string]interface{}
+	s1 := formatServiceInspect(t, newFormat(""), now)
+	s2 := formatServiceInspect(t, newFormat("{{json .}}"), now)
+	var m1Wrap []map[string]any
 	if err := json.Unmarshal([]byte(s1), &m1Wrap); err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +180,7 @@ func TestJSONFormatWithNoUpdateConfig(t *testing.T) {
 		t.Fatalf("strange s1=%s", s1)
 	}
 	m1 := m1Wrap[0]
-	var m2 map[string]interface{}
+	var m2 map[string]any
 	if err := json.Unmarshal([]byte(s2), &m2); err != nil {
 		t.Fatal(err)
 	}
@@ -181,7 +188,7 @@ func TestJSONFormatWithNoUpdateConfig(t *testing.T) {
 }
 
 func TestPrettyPrintWithConfigsAndSecrets(t *testing.T) {
-	s := formatServiceInspect(t, NewFormat("pretty"), time.Now())
+	s := formatServiceInspect(t, newFormat("pretty"), time.Now())
 	assert.Check(t, is.Contains(s, "Log Driver:"), "Pretty print missing Log Driver")
 	assert.Check(t, is.Contains(s, "Configs:"), "Pretty print missing configs")
 	assert.Check(t, is.Contains(s, "Secrets:"), "Pretty print missing secrets")

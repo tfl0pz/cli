@@ -5,12 +5,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/docker/cli/cli/command"
+	"github.com/distribution/reference"
 	"github.com/docker/cli/cli/command/formatter"
-	"github.com/docker/distribution/reference"
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/docker/docker/pkg/stringid"
 	"github.com/docker/go-units"
+	"github.com/moby/moby/api/types/swarm"
+	"github.com/moby/moby/client"
 )
 
 const (
@@ -20,13 +19,12 @@ const (
 	taskIDHeader       = "ID"
 	desiredStateHeader = "DESIRED STATE"
 	currentStateHeader = "CURRENT STATE"
-	errorHeader        = "ERROR"
 
 	maxErrLength = 30
 )
 
-// NewTaskFormat returns a Format for rendering using a task Context
-func NewTaskFormat(source string, quiet bool) formatter.Format {
+// newTaskFormat returns a Format for rendering using a taskContext.
+func newTaskFormat(source string, quiet bool) formatter.Format {
 	switch source {
 	case formatter.TableFormatKey:
 		if quiet {
@@ -42,29 +40,35 @@ func NewTaskFormat(source string, quiet bool) formatter.Format {
 	return formatter.Format(source)
 }
 
-// FormatWrite writes the context
-func FormatWrite(ctx formatter.Context, tasks []swarm.Task, names map[string]string, nodes map[string]string) error {
-	render := func(format func(subContext formatter.SubContext) error) error {
-		for _, task := range tasks {
-			taskCtx := &taskContext{trunc: ctx.Trunc, task: task, name: names[task.ID], node: nodes[task.ID]}
-			if err := format(taskCtx); err != nil {
+// formatWrite writes the context.
+func formatWrite(fmtCtx formatter.Context, tasks client.TaskListResult, names map[string]string, nodes map[string]string) error {
+	taskCtx := &taskContext{
+		HeaderContext: formatter.HeaderContext{
+			Header: formatter.SubHeaderContext{
+				"ID":           taskIDHeader,
+				"Name":         formatter.NameHeader,
+				"Image":        formatter.ImageHeader,
+				"Node":         nodeHeader,
+				"DesiredState": desiredStateHeader,
+				"CurrentState": currentStateHeader,
+				"Error":        formatter.ErrorHeader,
+				"Ports":        formatter.PortsHeader,
+			},
+		},
+	}
+	return fmtCtx.Write(taskCtx, func(format func(subContext formatter.SubContext) error) error {
+		for _, task := range tasks.Items {
+			if err := format(&taskContext{
+				trunc: fmtCtx.Trunc,
+				task:  task,
+				name:  names[task.ID],
+				node:  nodes[task.ID],
+			}); err != nil {
 				return err
 			}
 		}
 		return nil
-	}
-	taskCtx := taskContext{}
-	taskCtx.Header = formatter.SubHeaderContext{
-		"ID":           taskIDHeader,
-		"Name":         formatter.NameHeader,
-		"Image":        formatter.ImageHeader,
-		"Node":         nodeHeader,
-		"DesiredState": desiredStateHeader,
-		"CurrentState": currentStateHeader,
-		"Error":        errorHeader,
-		"Ports":        formatter.PortsHeader,
-	}
-	return ctx.Write(&taskCtx, render)
+	})
 }
 
 type taskContext struct {
@@ -81,7 +85,7 @@ func (c *taskContext) MarshalJSON() ([]byte, error) {
 
 func (c *taskContext) ID() string {
 	if c.trunc {
-		return stringid.TruncateID(c.task.ID)
+		return formatter.TruncateID(c.task.ID)
 	}
 	return c.task.ID
 }
@@ -111,12 +115,12 @@ func (c *taskContext) Node() string {
 }
 
 func (c *taskContext) DesiredState() string {
-	return command.PrettyPrint(c.task.DesiredState)
+	return formatter.PrettyPrint(c.task.DesiredState)
 }
 
 func (c *taskContext) CurrentState() string {
 	return fmt.Sprintf("%s %s ago",
-		command.PrettyPrint(c.task.Status.State),
+		formatter.PrettyPrint(c.task.Status.State),
 		strings.ToLower(units.HumanDuration(time.Since(c.task.Status.Timestamp))),
 	)
 }
@@ -124,11 +128,11 @@ func (c *taskContext) CurrentState() string {
 func (c *taskContext) Error() string {
 	// Trim and quote the error message.
 	taskErr := c.task.Status.Err
-	if c.trunc && len(taskErr) > maxErrLength {
-		taskErr = fmt.Sprintf("%s…", taskErr[:maxErrLength-1])
+	if c.trunc {
+		taskErr = formatter.Ellipsis(taskErr, maxErrLength)
 	}
 	if len(taskErr) > 0 {
-		taskErr = fmt.Sprintf("\"%s\"", taskErr)
+		taskErr = fmt.Sprintf(`"%s"`, taskErr)
 	}
 	return taskErr
 }
@@ -137,7 +141,7 @@ func (c *taskContext) Ports() string {
 	if len(c.task.Status.PortStatus.Ports) == 0 {
 		return ""
 	}
-	ports := []string{}
+	ports := make([]string, 0, len(c.task.Status.PortStatus.Ports))
 	for _, pConfig := range c.task.Status.PortStatus.Ports {
 		ports = append(ports, fmt.Sprintf("*:%d->%d/%s",
 			pConfig.PublishedPort,

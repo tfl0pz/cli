@@ -3,12 +3,10 @@ package builders
 import (
 	"time"
 
-	"github.com/docker/docker/api/types/swarm"
+	"github.com/moby/moby/api/types/swarm"
 )
 
-var (
-	defaultTime = time.Date(2009, time.November, 10, 23, 0, 0, 0, time.UTC)
-)
+var defaultTime = time.Date(2009, time.November, 10, 23, 0, 0, 0, time.UTC)
 
 // Task creates a task with default values .
 // Any number of task function builder can be pass to augment it.

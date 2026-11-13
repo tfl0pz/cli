@@ -2,16 +2,14 @@ package node
 
 import (
 	"context"
-	"strings"
+	"errors"
 
 	"github.com/docker/cli/cli"
 	"github.com/docker/cli/cli/command"
 	"github.com/docker/cli/cli/command/idresolver"
 	"github.com/docker/cli/cli/command/task"
 	"github.com/docker/cli/opts"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/swarm"
-	"github.com/pkg/errors"
+	"github.com/moby/moby/client"
 	"github.com/spf13/cobra"
 )
 
@@ -24,7 +22,7 @@ type psOptions struct {
 	filter    opts.FilterOpt
 }
 
-func newPsCommand(dockerCli command.Cli) *cobra.Command {
+func newPsCommand(dockerCLI command.Cli) *cobra.Command {
 	options := psOptions{filter: opts.NewFilterOpt()}
 
 	cmd := &cobra.Command{
@@ -38,8 +36,10 @@ func newPsCommand(dockerCli command.Cli) *cobra.Command {
 				options.nodeIDs = args
 			}
 
-			return runPs(dockerCli, options)
+			return runPs(cmd.Context(), dockerCLI, options)
 		},
+		ValidArgsFunction:     completeNodeNames(dockerCLI),
+		DisableFlagsInUseLine: true,
 	}
 	flags := cmd.Flags()
 	flags.BoolVar(&options.noTrunc, "no-trunc", false, "Do not truncate output")
@@ -48,57 +48,54 @@ func newPsCommand(dockerCli command.Cli) *cobra.Command {
 	flags.StringVar(&options.format, "format", "", "Pretty-print tasks using a Go template")
 	flags.BoolVarP(&options.quiet, "quiet", "q", false, "Only display task IDs")
 
+	_ = cmd.RegisterFlagCompletionFunc("filter", completeNodePsFilters(dockerCLI))
+
 	return cmd
 }
 
-func runPs(dockerCli command.Cli, options psOptions) error {
-	client := dockerCli.Client()
-	ctx := context.Background()
+func runPs(ctx context.Context, dockerCLI command.Cli, options psOptions) error {
+	apiClient := dockerCLI.Client()
 
 	var (
-		errs  []string
-		tasks []swarm.Task
+		errs  []error
+		tasks = client.TaskListResult{}
 	)
 
 	for _, nodeID := range options.nodeIDs {
-		nodeRef, err := Reference(ctx, client, nodeID)
+		nodeRef, err := Reference(ctx, apiClient, nodeID)
 		if err != nil {
-			errs = append(errs, err.Error())
+			errs = append(errs, err)
 			continue
 		}
 
-		node, _, err := client.NodeInspectWithRaw(ctx, nodeRef)
+		res, err := apiClient.NodeInspect(ctx, nodeRef, client.NodeInspectOptions{})
 		if err != nil {
-			errs = append(errs, err.Error())
+			errs = append(errs, err)
 			continue
 		}
 
 		filter := options.filter.Value()
-		filter.Add("node", node.ID)
+		filter.Add("node", res.Node.ID)
 
-		nodeTasks, err := client.TaskList(ctx, types.TaskListOptions{Filters: filter})
+		nodeTasks, err := apiClient.TaskList(ctx, client.TaskListOptions{Filters: filter})
 		if err != nil {
-			errs = append(errs, err.Error())
+			errs = append(errs, err)
 			continue
 		}
 
-		tasks = append(tasks, nodeTasks...)
+		tasks.Items = append(tasks.Items, nodeTasks.Items...)
 	}
 
 	format := options.format
 	if len(format) == 0 {
-		format = task.DefaultFormat(dockerCli.ConfigFile(), options.quiet)
+		format = task.DefaultFormat(dockerCLI.ConfigFile(), options.quiet)
 	}
 
-	if len(errs) == 0 || len(tasks) != 0 {
-		if err := task.Print(ctx, dockerCli, tasks, idresolver.New(client, options.noResolve), !options.noTrunc, options.quiet, format); err != nil {
-			errs = append(errs, err.Error())
+	if len(errs) == 0 || len(tasks.Items) != 0 {
+		if err := task.Print(ctx, dockerCLI, tasks, idresolver.New(apiClient, options.noResolve), !options.noTrunc, options.quiet, format); err != nil {
+			errs = append(errs, err)
 		}
 	}
 
-	if len(errs) > 0 {
-		return errors.Errorf("%s", strings.Join(errs, "\n"))
-	}
-
-	return nil
+	return errors.Join(errs...)
 }

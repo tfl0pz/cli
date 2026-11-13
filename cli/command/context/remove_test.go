@@ -1,73 +1,64 @@
 package context
 
 import (
-	"io/ioutil"
-	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/containerd/errdefs"
 	"github.com/docker/cli/cli/config"
 	"github.com/docker/cli/cli/config/configfile"
-	"github.com/docker/cli/cli/context/store"
 	"gotest.tools/v3/assert"
+	is "gotest.tools/v3/assert/cmp"
 )
 
 func TestRemove(t *testing.T) {
-	cli, cleanup := makeFakeCli(t)
-	defer cleanup()
-	createTestContextWithKubeAndSwarm(t, cli, "current", "all")
-	createTestContextWithKubeAndSwarm(t, cli, "other", "all")
-	assert.NilError(t, RunRemove(cli, RemoveOptions{}, []string{"other"}))
+	cli := makeFakeCli(t)
+	createTestContexts(t, cli, "current", "other")
+	assert.NilError(t, runRemove(cli, removeOptions{}, []string{"other"}))
 	_, err := cli.ContextStore().GetMetadata("current")
 	assert.NilError(t, err)
 	_, err = cli.ContextStore().GetMetadata("other")
-	assert.Check(t, store.IsErrContextDoesNotExist(err))
+	assert.Check(t, is.ErrorType(err, errdefs.IsNotFound))
 }
 
 func TestRemoveNotAContext(t *testing.T) {
-	cli, cleanup := makeFakeCli(t)
-	defer cleanup()
-	createTestContextWithKubeAndSwarm(t, cli, "current", "all")
-	createTestContextWithKubeAndSwarm(t, cli, "other", "all")
-	err := RunRemove(cli, RemoveOptions{}, []string{"not-a-context"})
+	cli := makeFakeCli(t)
+	createTestContexts(t, cli, "current", "other")
+	err := runRemove(cli, removeOptions{}, []string{"not-a-context"})
 	assert.ErrorContains(t, err, `context "not-a-context" does not exist`)
+
+	err = runRemove(cli, removeOptions{force: true}, []string{"not-a-context"})
+	assert.NilError(t, err)
 }
 
 func TestRemoveCurrent(t *testing.T) {
-	cli, cleanup := makeFakeCli(t)
-	defer cleanup()
-	createTestContextWithKubeAndSwarm(t, cli, "current", "all")
-	createTestContextWithKubeAndSwarm(t, cli, "other", "all")
+	cli := makeFakeCli(t)
+	createTestContexts(t, cli, "current", "other")
 	cli.SetCurrentContext("current")
-	err := RunRemove(cli, RemoveOptions{}, []string{"current"})
-	assert.ErrorContains(t, err, "current: context is in use, set -f flag to force remove")
+	err := runRemove(cli, removeOptions{}, []string{"current"})
+	assert.ErrorContains(t, err, `context "current" is in use, set -f flag to force remove`)
 }
 
 func TestRemoveCurrentForce(t *testing.T) {
-	configDir, err := ioutil.TempDir("", t.Name()+"config")
-	assert.NilError(t, err)
-	defer os.RemoveAll(configDir)
+	configDir := t.TempDir()
 	configFilePath := filepath.Join(configDir, "config.json")
 	testCfg := configfile.New(configFilePath)
 	testCfg.CurrentContext = "current"
 	assert.NilError(t, testCfg.Save())
 
-	cli, cleanup := makeFakeCli(t, withCliConfig(testCfg))
-	defer cleanup()
-	createTestContextWithKubeAndSwarm(t, cli, "current", "all")
-	createTestContextWithKubeAndSwarm(t, cli, "other", "all")
+	cli := makeFakeCli(t, withCliConfig(testCfg))
+	createTestContexts(t, cli, "current", "other")
 	cli.SetCurrentContext("current")
-	assert.NilError(t, RunRemove(cli, RemoveOptions{Force: true}, []string{"current"}))
+	assert.NilError(t, runRemove(cli, removeOptions{force: true}, []string{"current"}))
 	reloadedConfig, err := config.Load(configDir)
 	assert.NilError(t, err)
 	assert.Equal(t, "", reloadedConfig.CurrentContext)
 }
 
 func TestRemoveDefault(t *testing.T) {
-	cli, cleanup := makeFakeCli(t)
-	defer cleanup()
-	createTestContextWithKubeAndSwarm(t, cli, "other", "all")
+	cli := makeFakeCli(t)
+	createTestContext(t, cli, "other", nil)
 	cli.SetCurrentContext("current")
-	err := RunRemove(cli, RemoveOptions{}, []string{"default"})
-	assert.ErrorContains(t, err, `default: context "default" cannot be removed`)
+	err := runRemove(cli, removeOptions{}, []string{"default"})
+	assert.ErrorContains(t, err, `context "default" cannot be removed`)
 }
